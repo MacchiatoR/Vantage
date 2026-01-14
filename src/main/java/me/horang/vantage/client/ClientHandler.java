@@ -42,27 +42,26 @@ public class ClientHandler {
             mc.options.setCameraType(CameraType.FIRST_PERSON);
 
         } else if (mc.screen == null) {
-            // [상태 2] 아무 창도 없다면 -> 에디터 켜기
-
             // 1. 에디터 UI 열기
             mc.setScreen(new VantageEditorScreen());
 
-            // 2. 카메라 데이터 초기화 (현재 플레이어 눈 위치에서 시작)
+            // 2. 카메라 위치 계산 (수정됨!)
             VantageCamera cam = VantageCamera.get();
-            Vec3 eyePos = mc.player.getEyePosition(1.0f); // partialTick 1.0 기준 부드러운 위치
+            Vec3 eyePos = mc.player.getEyePosition(1.0f);
+            Vec3 lookVec = mc.player.getViewVector(1.0f); // 바라보는 방향 (정규화된 벡터)
+
+            // 시선 반대 방향으로 4블록 뒤로 물러남
+            Vec3 startPos = eyePos.subtract(lookVec.scale(4.0));
 
             cam.setTransform(
-                    eyePos,
+                    startPos,
                     mc.player.getYRot(),
                     mc.player.getXRot(),
-                    0f // Roll 초기화
+                    0f
             );
-
-            // 3. 카메라 하이재킹 활성화
             cam.setActive(true);
 
-            // 4. 3인칭 후방 시점으로 변경
-            // (이걸 해야 카메라가 내 몸통 위치에 있어도 내 캐릭터가 렌더링됨)
+            // 3. 3인칭 후방 시점
             mc.options.setCameraType(CameraType.THIRD_PERSON_BACK);
         }
     }

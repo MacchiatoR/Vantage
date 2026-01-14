@@ -1,9 +1,11 @@
 package me.horang.vantage.ui;
 
+import me.horang.vantage.client.VantageCamera;
 import me.horang.vantage.data.ProjectManager;
 import me.horang.vantage.ui.components.InspectorPanel;
 import me.horang.vantage.ui.components.OutlinerPanel;
 import me.horang.vantage.ui.components.TimelinePanel;
+import me.horang.vantage.ui.components.TopMenuBar;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
@@ -14,6 +16,7 @@ public class VantageEditorScreen extends Screen {
     private InspectorPanel inspectorPanel;
     private TimelinePanel timelinePanel;
     private OutlinerPanel outlinerPanel;
+    private TopMenuBar topMenuBar;
 
     // 레이아웃 상수
     private static final int TOP_BAR_HEIGHT = 24;
@@ -21,31 +24,31 @@ public class VantageEditorScreen extends Screen {
     private static final int SIDEBAR_WIDTH = 200;
     private static final int OUTLINER_WIDTH = 150;
 
+    private boolean isCameraRotating = false;
+
     public VantageEditorScreen() {
         super(Component.literal("Vantage Editor"));
     }
 
     @Override
     protected void init() {
-        // 1. 패널 인스턴스 생성 (없으면)
+        // 1. 패널 생성
+        if (topMenuBar == null) topMenuBar = new TopMenuBar(this.width); // [New]
         if (inspectorPanel == null) inspectorPanel = new InspectorPanel();
         if (timelinePanel == null) timelinePanel = new TimelinePanel();
         if (outlinerPanel == null) outlinerPanel = new OutlinerPanel();
 
-        // 2. 동적 레이아웃 계산 (반응형 UI)
-        int workspaceHeight = this.height - TOP_BAR_HEIGHT - TIMELINE_HEIGHT;
-        int workspaceWidth = this.width - OUTLINER_WIDTH - SIDEBAR_WIDTH;
+        // 2. 레이아웃
+        int workspaceHeight = this.height - 24 - 60; // topHeight, timelineHeight
 
-        // 좌측: 아웃라이너
-        outlinerPanel.setBounds(0, TOP_BAR_HEIGHT, OUTLINER_WIDTH, workspaceHeight);
+        topMenuBar.setBounds(0, 0, this.width, 24); // [New]
+        outlinerPanel.setBounds(0, 24, 150, workspaceHeight);
+        inspectorPanel.setBounds(this.width - 200, 24, 200, workspaceHeight);
+        timelinePanel.setBounds(0, this.height - 60, this.width, 60);
 
-        // 우측: 인스펙터
-        inspectorPanel.setBounds(this.width - SIDEBAR_WIDTH, TOP_BAR_HEIGHT, SIDEBAR_WIDTH, workspaceHeight);
-
-        // 하단: 타임라인
-        timelinePanel.setBounds(0, this.height - TIMELINE_HEIGHT, this.width, TIMELINE_HEIGHT);
-
-        // 3. 이벤트 리스너 등록 (클릭 등 처리)
+        // 3. 위젯 등록 (등록 순서가 렌더링 순서에 영향)
+        // 배경 위에 그려져야 하므로 addRenderableWidget 사용
+        this.addRenderableWidget(topMenuBar); // [New]
         this.addRenderableWidget(outlinerPanel);
         this.addRenderableWidget(inspectorPanel);
         this.addRenderableWidget(timelinePanel);
@@ -56,29 +59,57 @@ public class VantageEditorScreen extends Screen {
         // 1. 전체 배경 (어둡게 처리) - 월드가 살짝 비치게
         guiGraphics.fill(0, 0, this.width, this.height, EditorTheme.COLOR_BACKGROUND);
 
-        // 2. 상단 메뉴바 그리기 (간단해서 별도 클래스 없이 여기서 직접 그림)
-        renderTopBar(guiGraphics);
-
         // 3. 자식 위젯(패널들) 렌더링 - super.render가 addRenderableWidget 된 것들을 그려줌
         super.render(guiGraphics, mouseX, mouseY, partialTick);
-    }
-
-    private void renderTopBar(GuiGraphics guiGraphics) {
-        guiGraphics.fill(0, 0, this.width, TOP_BAR_HEIGHT, EditorTheme.COLOR_PANEL);
-        guiGraphics.hLine(0, this.width, TOP_BAR_HEIGHT - 1, EditorTheme.COLOR_BORDER);
-
-        // 로고 / 타이틀
-        guiGraphics.drawString(this.font, "VANTAGE", 10, 8, EditorTheme.COLOR_ACCENT, EditorTheme.FONT_SHADOW);
-
-        // 메뉴 버튼 시늉 (나중에 실제 버튼으로 교체)
-        guiGraphics.drawString(this.font, "File", 70, 8, EditorTheme.COLOR_TEXT, EditorTheme.FONT_SHADOW);
-        guiGraphics.drawString(this.font, "Edit", 100, 8, EditorTheme.COLOR_TEXT, EditorTheme.FONT_SHADOW);
-        guiGraphics.drawString(this.font, "View", 130, 8, EditorTheme.COLOR_TEXT, EditorTheme.FONT_SHADOW);
     }
 
     @Override
     public boolean isPauseScreen() {
         return false; // 중요: false로 해야 게임 시간이 멈추지 않고 배경이 움직임
+    }
+
+    @Override
+    public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        // 우클릭(1)이면 카메라 회전 모드 진입
+        if (button == 1) {
+            isCameraRotating = true;
+            // 마우스 커서 숨기고 고정 (선택사항)
+            this.minecraft.mouseHandler.grabMouse();
+            return true;
+        }
+        return super.mouseClicked(mouseX, mouseY, button);
+    }
+
+    @Override
+    public boolean mouseReleased(double mouseX, double mouseY, int button) {
+        if (button == 1) {
+            isCameraRotating = false;
+            this.minecraft.mouseHandler.releaseMouse();
+            return true;
+        }
+        return super.mouseReleased(mouseX, mouseY, button);
+    }
+
+    // 마우스 이동 감지 (화면 회전용)
+    // Screen 클래스에는 mouseMoved 대신 mouseDragged 같은 걸 쓰거나
+    // 직접 InputHandler에서 Delta 값을 가져와야 함.
+    // 하지만 가장 쉬운 건 mouseDragged 오버라이드임.
+
+    @Override
+    public void mouseMoved(double mouseX, double mouseY) {
+        // mouseMoved는 클릭 안 했을 때.
+        // 우클릭 드래그는 mouseDragged에서 처리됨.
+    }
+
+    @Override
+    public boolean mouseDragged(double mouseX, double mouseY, int button, double dragX, double dragY) {
+        if (isCameraRotating && button == 1) {
+            float sensitivity = 0.3f;
+            // dragX, dragY는 마우스 이동량
+            VantageCamera.get().addRotation((float)dragX * sensitivity, (float)dragY * sensitivity);
+            return true;
+        }
+        return super.mouseDragged(mouseX, mouseY, button, dragX, dragY);
     }
 
     private void saveCurrentWork() {
