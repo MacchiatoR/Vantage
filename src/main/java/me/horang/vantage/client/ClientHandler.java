@@ -13,6 +13,7 @@ import net.neoforged.fml.common.Mod;
 import net.neoforged.neoforge.client.event.InputEvent;
 import org.lwjgl.glfw.GLFW;
 
+@EventBusSubscriber(modid = "vantage", value = Dist.CLIENT)
 public class ClientHandler {
 
     @SubscribeEvent

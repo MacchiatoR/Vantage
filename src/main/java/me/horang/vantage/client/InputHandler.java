@@ -10,6 +10,7 @@ import net.neoforged.fml.common.Mod;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
 import org.lwjgl.glfw.GLFW;
 
+@EventBusSubscriber(modid = "vantage", value = Dist.CLIENT)
 public class InputHandler {
 
     // 이동 속도
@@ -52,8 +53,8 @@ public class InputHandler {
         double up = 0;
 
         // WASD 입력 감지 (GLFW 직접 호출)
-        if (InputConstants.isKeyDown(window, GLFW.GLFW_KEY_W)) forward += 1;
-        if (InputConstants.isKeyDown(window, GLFW.GLFW_KEY_S)) forward -= 1;
+        if (InputConstants.isKeyDown(window, GLFW.GLFW_KEY_W)) forward -= 1;
+        if (InputConstants.isKeyDown(window, GLFW.GLFW_KEY_S)) forward += 1;
         if (InputConstants.isKeyDown(window, GLFW.GLFW_KEY_A)) strafe += 1; // 왼쪽
         if (InputConstants.isKeyDown(window, GLFW.GLFW_KEY_D)) strafe -= 1; // 오른쪽
         if (InputConstants.isKeyDown(window, GLFW.GLFW_KEY_SPACE)) up += 1;
