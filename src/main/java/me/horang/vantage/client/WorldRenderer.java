@@ -2,189 +2,360 @@ package me.horang.vantage.client;
 
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.*;
+import me.horang.vantage.data.PlaybackManager;
 import me.horang.vantage.data.SceneData;
-import me.horang.vantage.ui.VantageEditorScreen;
+import me.horang.vantage.util.RaycastHelper;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GameRenderer;
-import net.minecraft.world.phys.HitResult;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
-import net.neoforged.fml.common.Mod;
-import net.neoforged.neoforge.client.event.InputEvent;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
 import org.joml.Matrix4f;
-import org.lwjgl.glfw.GLFW;
-
-import java.util.Optional;
 
 @EventBusSubscriber(modid = "vantage", value = Dist.CLIENT)
 public class WorldRenderer {
 
-    // 정사면체 크기
     private static final float NODE_SIZE = 0.5f;
 
     @SubscribeEvent
     public static void onRenderWorld(RenderLevelStageEvent event) {
-        // 반투명 블록들 다 그리고 난 뒤에 그림 (AFTER_TRANSLUCENT)
-        if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_TRANSLUCENT) return;
+        if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_TRANSLUCENT_BLOCKS) return;
         if (!VantageCamera.get().isActive()) return;
+        if (PlaybackManager.isPlaying()) return;
 
         PoseStack poseStack = event.getPoseStack();
         Minecraft mc = Minecraft.getInstance();
-        Vec3 cameraPos = VantageCamera.get().getPosition();
+        Vec3 camPos = VantageCamera.get().getInterpolatedPosition(event.getPartialTick().getGameTimeDeltaPartialTick(true));
         SceneData data = SceneData.get();
 
-        poseStack.pushPose();
-        // 카메라 위치를 기준으로 상대 좌표 계산을 위해 이동
-        poseStack.translate(-cameraPos.x, -cameraPos.y, -cameraPos.z);
+        renderAnchor(poseStack, camPos, data.getAnchor());
 
-        // 1. 기존 노드들 렌더링
+        // --- 렌더링 공통 설정 ---
+        RenderSystem.enableBlend();
+        RenderSystem.defaultBlendFunc();
+        RenderSystem.setShader(GameRenderer::getPositionColorShader);
+
+        // [중요] 노드(큐브)를 그릴 때는 뒷면을 숨겨야(Cull) 투명도 겹침 문제가 사라집니다.
+        RenderSystem.enableCull();
+        RenderSystem.enableDepthTest();
+
+        RaycastHelper.Ray mouseRay = RaycastHelper.getMouseRay(mc.mouseHandler.xpos(), mc.mouseHandler.ypos());
+
+        // 1. 노드 렌더링
         for (SceneData.Node node : data.getNodes()) {
             boolean isSelected = (data.getSelectedNode() == node);
-            renderTetrahedron(poseStack, node.position, isSelected ? 0xFFFF0000 : 0xFFFFFFFF); // 선택되면 빨강
+
+            // 호버링 체크 (단순 거리 체크 방식이 더 빠를 수 있음, 여기선 기존 로직 유지)
+            boolean isHovered = false;
+            if (mouseRay != null) {
+                AABB box = new AABB(node.position.x - NODE_SIZE/2, node.position.y - NODE_SIZE/2, node.position.z - NODE_SIZE/2,
+                        node.position.x + NODE_SIZE/2, node.position.y + NODE_SIZE/2, node.position.z + NODE_SIZE/2);
+                isHovered = box.clip(mouseRay.origin, mouseRay.origin.add(mouseRay.dir.scale(100))).isPresent();
+            }
+
+            // 색상 설정
+            int faceColor, frontFaceColor, edgeColor;
+            if (isSelected) {
+                faceColor = 0x66FF0000; frontFaceColor = 0xAAFF5555; edgeColor = 0xFFFF0000;
+            } else if (isHovered) {
+                faceColor = 0x66FFFF00; frontFaceColor = 0xAAFFFF55; edgeColor = 0xFFFFFF00;
+            } else {
+                faceColor = 0x44FFFFFF; frontFaceColor = 0x880000FF; edgeColor = 0x88FFFFFF;
+            }
+
+            poseStack.pushPose();
+            poseStack.translate(node.position.x - camPos.x, node.position.y - camPos.y, node.position.z - camPos.z);
+
+            // 회전 적용
+            poseStack.mulPose(com.mojang.math.Axis.YP.rotationDegrees(-node.yaw));
+            poseStack.mulPose(com.mojang.math.Axis.XP.rotationDegrees(node.pitch));
+
+            // [수정된 함수 호출] 큐브와 "방향 표시 돌기"를 함께 그립니다.
+            renderNodeGeometry(poseStack, faceColor, frontFaceColor);
+
+            // 테두리 (선) - 뎁스 테스트 살짝 꺼서 잘 보이게 하거나, PolygonOffset 사용 권장 (여기선 단순화)
+            renderCubeEdges(poseStack, edgeColor);
+
+            poseStack.popPose();
         }
 
-        // 2. 라인 렌더링
+        // 2. 연결선 및 기타 렌더링 (Cull 꺼도 됨)
+        RenderSystem.disableCull();
+
         for (SceneData.Connection conn : data.getConnections()) {
-            renderLine(poseStack, conn.start.position, conn.end.position, 0xFF00FF00); // 초록색 선
+            poseStack.pushPose();
+            poseStack.translate(-camPos.x, -camPos.y, -camPos.z);
+
+            boolean isSelectedLine = (data.getSelectedConnection() == conn);
+            int color = isSelectedLine ? 0xFFFF0000 : 0xFF00FF00;
+            RenderSystem.lineWidth(isSelectedLine ? 6.0f : 3.0f);
+
+            // [Fix] 곡선(Tension > 0)일 경우 쪼개서 그리기
+            if (conn.tension > 0.001f) {
+                // 이전/다음 점 구하기 (PlaybackManager와 동일 로직)
+                SceneData.Connection prevConn = data.getConnectionTo(conn.start);
+                Vec3 p0 = (prevConn != null) ? prevConn.start.position : conn.start.position;
+
+                SceneData.Connection nextConn = data.getConnectionFrom(conn.end);
+                Vec3 p3 = (nextConn != null) ? nextConn.end.position : conn.end.position;
+
+                // 20등분하여 곡선 그리기
+                int segments = 20;
+                Vec3 prevPoint = conn.start.position;
+
+                for (int i = 1; i <= segments; i++) {
+                    float t = (float) i / segments;
+                    Vec3 currPoint = SceneData.getSplinePoint(t, p0, conn.start.position, conn.end.position, p3);
+
+                    renderLine(poseStack, prevPoint, currPoint, color);
+                    prevPoint = currPoint;
+                }
+            } else {
+                // 직선 그리기
+                renderLine(poseStack, conn.start.position, conn.end.position, color);
+            }
+
+            poseStack.popPose();
+        }
+        RenderSystem.lineWidth(1.0f);
+
+        // 3. 기즈모 (항상 보이게 Depth Test 끄기)
+        if (data.getTool() == SceneData.ToolMode.SELECT && data.getSelectedNode() != null) {
+            GizmoSystem.render(poseStack, camPos, mc.mouseHandler.xpos(), mc.mouseHandler.ypos());
         }
 
-        // 3. 도구별 프리뷰 (Preview)
-        Vec3 hitPos = getMouseHitPos(mc); // 마우스가 가리키는 월드 좌표
-
-        if (data.getTool() == SceneData.ToolMode.NODE && hitPos != null) {
-            // 마우스 커서에 정사면체 따라다니기 (반투명)
-            renderTetrahedron(poseStack, hitPos, 0x88FFFF00); // 노란색 반투명
+        // 4. 프리뷰 (N 모드)
+        if (data.getTool() == SceneData.ToolMode.NODE) {
+            Vec3 hitPos = RaycastHelper.getRaycastHit(mc.mouseHandler.xpos(), mc.mouseHandler.ypos());
+            if (hitPos != null) {
+                RenderSystem.enableCull(); // 프리뷰도 깔끔하게
+                RenderSystem.disableDepthTest();
+                poseStack.pushPose();
+                poseStack.translate(hitPos.x - camPos.x, hitPos.y - camPos.y, hitPos.z - camPos.z);
+                renderNodeGeometry(poseStack, 0x88FFFF00, 0xAAFFFF55);
+                poseStack.popPose();
+                RenderSystem.enableDepthTest();
+            }
         }
-        else if (data.getTool() == SceneData.ToolMode.LINE && data.getSelectedNode() != null && hitPos != null) {
-            // 선 연결 중일 때: 선택한 노드 ~ 마우스 커서 선 잇기
-            renderLine(poseStack, data.getSelectedNode().position, hitPos, 0x88FFFFFF);
-        }
 
-        poseStack.popPose();
+        RenderSystem.disableBlend();
     }
 
-    // 마우스 클릭 이벤트 처리 (배치 로직)
-    @SubscribeEvent
-    public static void onMouseClick(InputEvent.MouseButton.Pre event) {
-        Minecraft mc = Minecraft.getInstance();
+    public static boolean handleClick(int button) {
+        if (button != 0) return false;
+
         SceneData data = SceneData.get();
+        Minecraft mc = Minecraft.getInstance();
+        double mouseX = mc.mouseHandler.xpos();
+        double mouseY = mc.mouseHandler.ypos();
 
-        // 에디터가 켜져있고, 좌클릭을 눌렀을 때
-        if (mc.screen instanceof VantageEditorScreen &&
-                event.getButton() == 0 && event.getAction() == GLFW.GLFW_PRESS) {
+        // 1. 기즈모 처리
+        if (data.getTool() == SceneData.ToolMode.SELECT && GizmoSystem.handlePress(button, mouseX, mouseY)) {
+            return true;
+        }
 
-            // UI 위 클릭은 무시 (VantageEditorScreen에서 처리됨)
-            // 여기서는 월드 클릭 로직만
+        RaycastHelper.Ray ray = RaycastHelper.getMouseRay(mouseX, mouseY);
+        if (ray == null) return false;
 
-            Vec3 hitPos = getMouseHitPos(mc);
-            if (hitPos == null) return; // 허공 클릭
-
-            if (data.getTool() == SceneData.ToolMode.NODE) {
-                // [기능 3] 노드 배치
-                data.addNode(hitPos, 0, 0); // 각도는 일단 0
+        // 2. 노드 선택
+        for (SceneData.Node node : data.getNodes()) {
+            AABB box = new AABB(
+                    node.position.x - NODE_SIZE/2, node.position.y - NODE_SIZE/2, node.position.z - NODE_SIZE/2,
+                    node.position.x + NODE_SIZE/2, node.position.y + NODE_SIZE/2, node.position.z + NODE_SIZE/2
+            );
+            if (box.clip(ray.origin, ray.origin.add(ray.dir.scale(100))).isPresent()) {
+                if (data.getTool() == SceneData.ToolMode.SELECT) {
+                    data.setSelectedNode(node); // 노드 선택 (선 선택은 SceneData에서 자동 해제됨)
+                } else if (data.getTool() == SceneData.ToolMode.LINE) {
+                    if (data.getSelectedNode() == null) data.setSelectedNode(node);
+                    else { data.connectNodes(data.getSelectedNode(), node); data.setSelectedNode(null); }
+                }
+                return true;
             }
-            else if (data.getTool() == SceneData.ToolMode.LINE) {
-                // [기능 4] 라인 연결
-                SceneData.Node clickedNode = findNodeNear(hitPos); // 클릭한 곳에 노드가 있나?
+        }
 
-                if (clickedNode != null) {
-                    if (data.getSelectedNode() == null) {
-                        // 첫 번째 노드 선택
-                        data.setSelectedNode(clickedNode);
-                    } else {
-                        // 두 번째 노드 클릭 -> 연결
-                        data.connectNodes(data.getSelectedNode(), clickedNode);
-                        data.setSelectedNode(null); // 초기화
-                    }
+        // 3. 선(Line) 선택 [문제 4 해결]
+        if (data.getTool() == SceneData.ToolMode.SELECT) {
+            // [Fix] 판정 범위를 0.3 -> 1.0으로 대폭 늘림 (마우스가 살짝 빗나가도 선택되게)
+            double bestDist = 1.0;
+            SceneData.Connection targetConn = null;
+
+            for (SceneData.Connection conn : data.getConnections()) {
+                double dist = RaycastHelper.getDistanceFromLine(ray, conn.start.position, conn.end.position);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    targetConn = conn;
                 }
             }
+
+            if (targetConn != null) {
+                data.setSelectedConnection(targetConn); // 선 선택
+                return true;
+            }
+
+            // 허공 클릭 시 해제
+            data.setSelectedNode(null);
+            data.setSelectedConnection(null);
         }
-    }
 
-    // --- Helper Methods ---
-
-    // 마우스 레이캐스팅 (Mouse -> World)
-    private static Vec3 getMouseHitPos(Minecraft mc) {
-        // 실제로는 Mouse picking ray를 쏴야 하지만,
-        // 간단하게 마인크래프트의 기본 'Target'을 가져오거나,
-        // VantageCamera 위치에서 정면으로 Ray를 쏴야 함.
-        // 여기서는 '현재 카메라가 보고 있는 블록'을 가져오는 약식 로직 사용.
-
-        // 정교한 Mouse Picking은 ViewMatrix 역행렬 연산이 필요한데,
-        // 일단은 "화면 중앙(십자선)" 기준으로 배치하는 걸로 타협하거나
-        // 나중에 Unproject 코드를 추가해야 함.
-        // *사용자가 '마우스 커서'를 원했으므로 십자선 기준 HitResult 사용*
-
-        HitResult hit = mc.hitResult; // 이건 플레이어 기준이라 부정확할 수 있음.
-
-        // VantageCamera 기준 RayTrace가 필요함. (복잡하므로 일단 임시로 카메라 앞 5칸)
-        // **중요**: 제대로 하려면 RayTracer를 별도로 구현해야 함.
-        // 이번 단계에서는 "카메라 앞 3미터 허공" or "카메라가 바라보는 블록"으로 단순화.
-
-        Vec3 camPos = VantageCamera.get().getPosition();
-        Vec3 lookVec = new Vec3(VantageCamera.get().getForwardVector()); // forward vector 계산 필요
-
-        // 임시: 카메라 앞 5블록 위치 반환 (허공 배치 가능하게)
-        return camPos.add(lookVec.scale(5.0));
-    }
-
-    // 클릭 위치 근처의 노드 찾기
-    private static SceneData.Node findNodeNear(Vec3 pos) {
-        for (SceneData.Node node : SceneData.get().getNodes()) {
-            if (node.position.distanceTo(pos) < NODE_SIZE * 1.5) {
-                return node;
+        // 4. 노드 생성
+        if (data.getTool() == SceneData.ToolMode.NODE) {
+            Vec3 hitPos = RaycastHelper.getRaycastHit(mouseX, mouseY);
+            if (hitPos != null) {
+                float yaw = mc.player != null ? mc.player.getYRot() : 0;
+                float pitch = mc.player != null ? mc.player.getXRot() : 0;
+                data.addNode(hitPos, yaw, pitch);
+                return true;
             }
         }
-        return null;
+
+        return false;
     }
 
-    // 정사면체 그리기 (Low-level Vertex Drawing)
-    private static void renderTetrahedron(PoseStack stack, Vec3 pos, int color) {
-        Matrix4f mat = stack.last().pose();
+    // --- Render Helpers (누락되었던 메서드들 포함) ---
+
+    // [Fix] 누락되었던 renderLine 추가
+    private static void renderLine(PoseStack stack, Vec3 start, Vec3 end, int color) {
         Tesselator tesselator = Tesselator.getInstance();
-        BufferBuilder buffer = tesselator.getBuilder(); // 1.21에서는 이름이 다를 수 있음 (BeginBufferBuilder 등)
-
-        // 1.21 NeoForge 렌더링 방식에 맞게 수정 필요
-        // 여기선 개념적 코드로 작성. 실제로는 RenderSystem.setShader... 필요
-
-        RenderSystem.setShader(GameRenderer::getPositionColorShader);
-        RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
-
-        // 정사면체 꼭짓점 4개
-        float s = NODE_SIZE;
-        float h = (float) (s * Math.sqrt(2.0/3.0));
-
-        buffer.begin(VertexFormat.Mode.TRIANGLES, DefaultVertexFormat.POSITION_COLOR);
-
-        // 삼각형 4개면 추가 (좌표 계산 로직은 생략, 정사면체 수학 적용)
-        // ... (Vertex building code) ...
-
-        // 임시로 큐브(Box) 그리기 (구현이 더 쉬움)
-        addBoxVertices(buffer, mat, pos, s, color);
-
-        tesselator.end();
-    }
-
-    // 큐브 그리기 헬퍼
-    private static void addBoxVertices(BufferBuilder buffer, Matrix4f mat, Vec3 pos, float s, int color) {
-        float x = (float)pos.x;
-        float y = (float)pos.y;
-        float z = (float)pos.z;
-        float hs = s / 2;
+        BufferBuilder buffer = tesselator.begin(VertexFormat.Mode.DEBUG_LINES, DefaultVertexFormat.POSITION_COLOR);
+        Matrix4f mat = stack.last().pose();
 
         int a = (color >> 24) & 0xFF;
         int r = (color >> 16) & 0xFF;
         int g = (color >> 8) & 0xFF;
-        int b = (color & 0xFF);
+        int b = (color) & 0xFF;
 
-        // 아주 단순화된 박스 버텍스 추가 (6면)
-        // ... 실제로는 24개 버텍스 add ...
+        buffer.addVertex(mat, (float)start.x, (float)start.y, (float)start.z).setColor(r, g, b, a);
+        buffer.addVertex(mat, (float)end.x, (float)end.y, (float)end.z).setColor(r, g, b, a);
+
+        try { BufferUploader.drawWithShader(buffer.buildOrThrow()); } catch (Exception e) {}
     }
 
-    private static void renderLine(PoseStack stack, Vec3 start, Vec3 end, int color) {
-        // Line Strip 렌더링
+    private static void renderAnchor(PoseStack stack, Vec3 camPos, Vec3 anchorPos) {
+        stack.pushPose();
+        stack.translate(anchorPos.x - camPos.x, anchorPos.y - camPos.y, anchorPos.z - camPos.z);
+        renderWireframeBox(stack, -0.3f, 0, -0.3f, 0.3f, 1.8f, 0.3f, 0xFF00FFFF);
+        stack.popPose();
+    }
+
+    private static void renderWireframeBox(PoseStack stack, float minX, float minY, float minZ, float maxX, float maxY, float maxZ, int color) {
+        Tesselator tesselator = Tesselator.getInstance();
+        BufferBuilder buffer = tesselator.begin(VertexFormat.Mode.DEBUG_LINES, DefaultVertexFormat.POSITION_COLOR);
+        Matrix4f mat = stack.last().pose();
+
+        int a = (color >> 24) & 0xFF;
+        int r = (color >> 16) & 0xFF;
+        int g = (color >> 8) & 0xFF;
+        int b = (color) & 0xFF;
+
+        addLine(buffer, mat, minX, minY, minZ, maxX, minY, minZ, r, g, b, a);
+        addLine(buffer, mat, maxX, minY, minZ, maxX, minY, maxZ, r, g, b, a);
+        addLine(buffer, mat, maxX, minY, maxZ, minX, minY, maxZ, r, g, b, a);
+        addLine(buffer, mat, minX, minY, maxZ, minX, minY, minZ, r, g, b, a);
+
+        addLine(buffer, mat, minX, maxY, minZ, maxX, maxY, minZ, r, g, b, a);
+        addLine(buffer, mat, maxX, maxY, minZ, maxX, maxY, maxZ, r, g, b, a);
+        addLine(buffer, mat, maxX, maxY, maxZ, minX, maxY, maxZ, r, g, b, a);
+        addLine(buffer, mat, minX, maxY, maxZ, minX, maxY, minZ, r, g, b, a);
+
+        addLine(buffer, mat, minX, minY, minZ, minX, maxY, minZ, r, g, b, a);
+        addLine(buffer, mat, maxX, minY, minZ, maxX, maxY, minZ, r, g, b, a);
+        addLine(buffer, mat, maxX, minY, maxZ, maxX, maxY, maxZ, r, g, b, a);
+        addLine(buffer, mat, minX, minY, maxZ, minX, maxY, maxZ, r, g, b, a);
+
+        try { BufferUploader.drawWithShader(buffer.buildOrThrow()); } catch (Exception e) {}
+    }
+
+    private static void renderNodeGeometry(PoseStack stack, int bodyColor, int frontColor) {
+        Tesselator tesselator = Tesselator.getInstance();
+        BufferBuilder buffer = tesselator.begin(VertexFormat.Mode.TRIANGLES, DefaultVertexFormat.POSITION_COLOR);
+        Matrix4f mat = stack.last().pose();
+
+        float s = NODE_SIZE / 2.0f; // 0.25
+
+        // 색상 분해
+        int a = (bodyColor >> 24) & 0xFF; int r = (bodyColor >> 16) & 0xFF; int g = (bodyColor >> 8) & 0xFF; int b = (bodyColor) & 0xFF;
+        int fa = (frontColor >> 24) & 0xFF; int fr = (frontColor >> 16) & 0xFF; int fg = (frontColor >> 8) & 0xFF; int fb = (frontColor) & 0xFF;
+
+        // --- 1. 메인 큐브 바디 (Cull 켰을 때 보이도록 CCW 순서 주의) ---
+        // Back (-Z)
+        addQuad(buffer, mat, s, s, -s, -s, s, -s, -s, -s, -s, s, -s, -s, r, g, b, a);
+        // Left (-X)
+        addQuad(buffer, mat, -s, s, -s, -s, s, s, -s, -s, s, -s, -s, -s, r, g, b, a);
+        // Right (+X)
+        addQuad(buffer, mat, s, s, s, s, s, -s, s, -s, -s, s, -s, s, r, g, b, a);
+        // Top (+Y)
+        addQuad(buffer, mat, -s, s, -s, s, s, -s, s, s, s, -s, s, s, r, g, b, a);
+        // Bottom (-Y)
+        addQuad(buffer, mat, -s, -s, s, s, -s, s, s, -s, -s, -s, -s, -s, r, g, b, a);
+        // Front (+Z) -> 정면 색상 적용
+        addQuad(buffer, mat, -s, s, s, s, s, s, s, -s, s, -s, -s, s, fr, fg, fb, fa);
+
+        // --- 2. 방향 표시 돌기 (Nose) ---
+        // 정면(+Z) 중앙에 작게 튀어나온 박스를 추가합니다.
+        float noseSize = s * 0.4f;   // 큐브 크기의 40%
+        float noseDepth = s + 0.1f;  // 큐브 앞면보다 0.1만큼 더 튀어나옴
+
+        // 돌기 앞면
+        addQuad(buffer, mat, -noseSize, noseSize, noseDepth, noseSize, noseSize, noseDepth,
+                noseSize, -noseSize, noseDepth, -noseSize, -noseSize, noseDepth, fr, fg, fb, fa);
+
+        // 돌기 옆면들 (Top/Bottom/Left/Right) - 입체감 있게 연결
+        // Top
+        addQuad(buffer, mat, -noseSize, noseSize, s, noseSize, noseSize, s, noseSize, noseSize, noseDepth, -noseSize, noseSize, noseDepth, fr, fg, fb, fa);
+        // Bottom
+        addQuad(buffer, mat, -noseSize, -noseSize, noseDepth, noseSize, -noseSize, noseDepth, noseSize, -noseSize, s, -noseSize, -noseSize, s, fr, fg, fb, fa);
+        // Right (+X)
+        addQuad(buffer, mat, noseSize, noseSize, s, noseSize, noseSize, noseDepth, noseSize, -noseSize, noseDepth, noseSize, -noseSize, s, fr, fg, fb, fa);
+        // Left (-X)
+        addQuad(buffer, mat, -noseSize, noseSize, noseDepth, -noseSize, noseSize, s, -noseSize, -noseSize, s, -noseSize, -noseSize, noseDepth, fr, fg, fb, fa);
+
+        try { BufferUploader.drawWithShader(buffer.buildOrThrow()); } catch (Exception e) {}
+    }
+
+    private static void renderCubeEdges(PoseStack stack, int color) {
+        Tesselator tesselator = Tesselator.getInstance();
+        BufferBuilder buffer = tesselator.begin(VertexFormat.Mode.DEBUG_LINES, DefaultVertexFormat.POSITION_COLOR);
+        Matrix4f mat = stack.last().pose();
+
+        float s = NODE_SIZE / 2.0f;
+        int a = (color >> 24) & 0xFF;
+        int r = (color >> 16) & 0xFF;
+        int g = (color >> 8) & 0xFF;
+        int b = (color) & 0xFF;
+
+        // 12 edges
+        addLine(buffer, mat, -s,-s,-s, s,-s,-s, r,g,b,a);
+        addLine(buffer, mat, s,-s,-s, s,-s,s, r,g,b,a);
+        addLine(buffer, mat, s,-s,s, -s,-s,s, r,g,b,a);
+        addLine(buffer, mat, -s,-s,s, -s,-s,-s, r,g,b,a);
+        addLine(buffer, mat, -s,s,-s, s,s,-s, r,g,b,a);
+        addLine(buffer, mat, s,s,-s, s,s,s, r,g,b,a);
+        addLine(buffer, mat, s,s,s, -s,s,s, r,g,b,a);
+        addLine(buffer, mat, -s,s,s, -s,s,-s, r,g,b,a);
+        addLine(buffer, mat, -s,-s,-s, -s,s,-s, r,g,b,a);
+        addLine(buffer, mat, s,-s,-s, s,s,-s, r,g,b,a);
+        addLine(buffer, mat, s,-s,s, s,s,s, r,g,b,a);
+        addLine(buffer, mat, -s,-s,s, -s,s,s, r,g,b,a);
+
+        try { BufferUploader.drawWithShader(buffer.buildOrThrow()); } catch (Exception e) {}
+    }
+
+    private static void addQuad(BufferBuilder b, Matrix4f m, float x1, float y1, float z1, float x2, float y2, float z2, float x3, float y3, float z3, float x4, float y4, float z4, int r, int g, int bl, int a) {
+        b.addVertex(m, x1, y1, z1).setColor(r,g,bl,a);
+        b.addVertex(m, x2, y2, z2).setColor(r,g,bl,a);
+        b.addVertex(m, x3, y3, z3).setColor(r,g,bl,a);
+
+        b.addVertex(m, x3, y3, z3).setColor(r,g,bl,a);
+        b.addVertex(m, x4, y4, z4).setColor(r,g,bl,a);
+        b.addVertex(m, x1, y1, z1).setColor(r,g,bl,a);
+    }
+
+    private static void addLine(BufferBuilder b, Matrix4f m, float x1, float y1, float z1, float x2, float y2, float z2, int r, int g, int bl, int a) {
+        b.addVertex(m, x1, y1, z1).setColor(r,g,bl,a);
+        b.addVertex(m, x2, y2, z2).setColor(r,g,bl,a);
     }
 }

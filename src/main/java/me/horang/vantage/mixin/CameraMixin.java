@@ -26,17 +26,10 @@ public abstract class CameraMixin {
     @Inject(method = "setup", at = @At("TAIL"))
     public void onSetup(BlockGetter level, Entity entity, boolean detached, boolean thirdPersonReverse, float partialTick, CallbackInfo ci) {
         VantageCamera vantage = VantageCamera.get();
-
         if (vantage.isActive()) {
-            // 1. 위치 강제 주입 (Position Override)
-            this.setPosition(vantage.getPosition());
-
-            // 2. 회전 강제 주입 (Rotation Override)
-            // 매개변수 순서: Yaw(yRot), Pitch(xRot)
-            this.setRotation(vantage.getYRot(), vantage.getXRot());
-
-            // 참고: Roll(기울기)은 Camera 클래스에 필드가 없어서 여기서 설정 불가.
-            // ClientHandler의 ViewportEvent나 GameRendererMixin에서 처리해야 함.
+            // [수정] 단순 getPosition() 대신 보간된 좌표 사용
+            this.setPosition(vantage.getInterpolatedPosition(partialTick));
+            this.setRotation(vantage.getInterpolatedYRot(partialTick), vantage.getInterpolatedXRot(partialTick));
         }
     }
 }

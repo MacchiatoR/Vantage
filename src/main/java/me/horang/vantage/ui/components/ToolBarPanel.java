@@ -8,7 +8,7 @@ import net.minecraft.client.gui.GuiGraphics;
 public class ToolBarPanel extends EditorPanel {
 
     public ToolBarPanel() {
-        super(""); // 타이틀 없음
+        super("");
     }
 
     @Override
@@ -19,55 +19,58 @@ public class ToolBarPanel extends EditorPanel {
         int startY = this.y + 10;
         int btnSize = 30;
         int gap = 5;
+        int x = this.x + 5;
 
-        // 1. NODE 버튼
-        drawToolButton(guiGraphics, mouseX, mouseY, startY, "N", SceneData.ToolMode.NODE);
+        // 1. SELECT (M) 버튼
+        drawToolButton(guiGraphics, mouseX, mouseY, x, startY, "M", SceneData.ToolMode.SELECT);
 
-        // 2. LINE 버튼
-        drawToolButton(guiGraphics, mouseX, mouseY, startY + btnSize + gap, "L", SceneData.ToolMode.LINE);
+        // 2. NODE (N) 버튼
+        drawToolButton(guiGraphics, mouseX, mouseY, x, startY + btnSize + gap, "N", SceneData.ToolMode.NODE);
+
+        // 3. LINE (L) 버튼
+        drawToolButton(guiGraphics, mouseX, mouseY, x, startY + (btnSize + gap) * 2, "L", SceneData.ToolMode.LINE);
     }
 
-    private void drawToolButton(GuiGraphics g, int mx, int my, int y, String label, SceneData.ToolMode mode) {
-        int x = this.x + 5;
+    private void drawToolButton(GuiGraphics g, int mx, int my, int x, int y, String label, SceneData.ToolMode mode) {
         int size = 30;
-
         boolean isSelected = SceneData.get().getTool() == mode;
         boolean isHovered = GuiUtils.isMouseOver(mx, my, x, y, size, size);
 
-        // 배경색 결정
-        int color = EditorTheme.COLOR_PANEL;
-        if (isSelected) color = EditorTheme.COLOR_ACCENT; // 선택되면 액센트 컬러
-        else if (isHovered) color = 0xFF444444;           // 호버 시 밝게
+        int color = isSelected ? EditorTheme.COLOR_ACCENT : (isHovered ? 0xFF444444 : EditorTheme.COLOR_PANEL);
 
         g.fill(x, y, x + size, y + size, color);
         GuiUtils.drawBorder(g, x, y, size, size, EditorTheme.COLOR_BORDER);
 
-        // 아이콘 (일단 텍스트로 대체)
         int textWidth = mc.font.width(label);
-        g.drawString(mc.font, label, x + (size - textWidth) / 2, y + 11, 0xFFFFFFFF, false);
+        int textColor = isSelected ? 0xFFFFFFFF : EditorTheme.COLOR_TEXT;
+        g.drawString(mc.font, label, x + (size - textWidth) / 2, y + 11, textColor, false);
     }
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
-        if (!super.isMouseOver(mouseX, mouseY)) return false;
+        if (!visible || !super.isMouseOver(mouseX, mouseY)) return false;
 
         int startY = this.y + 10;
         int btnSize = 30;
         int gap = 5;
         int x = this.x + 5;
 
-        // Node 버튼 클릭
+        // Select (M)
         if (GuiUtils.isMouseOver(mouseX, mouseY, x, startY, btnSize, btnSize)) {
+            SceneData.get().setTool(SceneData.ToolMode.SELECT);
+            return true;
+        }
+        // Node (N)
+        if (GuiUtils.isMouseOver(mouseX, mouseY, x, startY + btnSize + gap, btnSize, btnSize)) {
             SceneData.get().setTool(SceneData.ToolMode.NODE);
             return true;
         }
-
-        // Line 버튼 클릭
-        if (GuiUtils.isMouseOver(mouseX, mouseY, x, startY + btnSize + gap, btnSize, btnSize)) {
+        // Line (L)
+        if (GuiUtils.isMouseOver(mouseX, mouseY, x, startY + (btnSize + gap) * 2, btnSize, btnSize)) {
             SceneData.get().setTool(SceneData.ToolMode.LINE);
             return true;
         }
 
-        return true;
+        return false; // 툴바 배경 클릭은 무시 (이벤트 전파 방지 위해 true 리턴 권장하지만 여기선 false)
     }
 }

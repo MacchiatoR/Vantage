@@ -1,5 +1,6 @@
 package me.horang.vantage.ui.components;
 
+import me.horang.vantage.data.PlaybackManager;
 import me.horang.vantage.ui.EditorTheme;
 import me.horang.vantage.util.GuiUtils;
 import net.minecraft.client.gui.GuiGraphics;
@@ -50,10 +51,36 @@ public class TimelinePanel extends EditorPanel {
         // 4. 시간 텍스트 표시
         String timeStr = String.format("%.2f / %.2f", currentTime, maxTime);
         guiGraphics.drawString(mc.font, timeStr, this.x + this.width - 80, this.y + 8, EditorTheme.COLOR_TEXT_MUTED, EditorTheme.FONT_SHADOW);
+
+        // Play/Pause 버튼
+        int btnX = this.x + 70;
+        int btnY = this.y + 5;
+        int btnSize = 15;
+
+        boolean isPlaying = PlaybackManager.isPlaying();
+        String btnText = isPlaying ? "■" : "▶";
+
+        boolean hover = GuiUtils.isMouseOver(mouseX, mouseY, btnX, btnY, btnSize, btnSize);
+        int color = hover ? EditorTheme.COLOR_ACCENT : 0xFF888888;
+        if (isPlaying) color = 0xFFFF4444;
+
+        // 버튼 배경/테두리/텍스트 그리기
+        guiGraphics.drawString(mc.font, btnText, btnX + 4, btnY + 4, color, false);
+        GuiUtils.drawBorder(guiGraphics, btnX, btnY, btnSize, btnSize, color);
     }
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        // [문제 3 해결] 클릭 판정 좌표도 동일하게 이동
+        int btnX = this.x + 70;
+        int btnY = this.y + 5;
+
+        if (GuiUtils.isMouseOver(mouseX, mouseY, btnX, btnY, 15, 15)) {
+            if (PlaybackManager.isPlaying()) PlaybackManager.stop();
+            else PlaybackManager.play();
+            return true;
+        }
+
         if (super.mouseClicked(mouseX, mouseY, button)) {
             // 타임라인 트랙 영역을 클릭했는지 확인
             int trackY = this.y + 30;

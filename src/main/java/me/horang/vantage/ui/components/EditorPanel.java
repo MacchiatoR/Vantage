@@ -16,7 +16,7 @@ public abstract class EditorPanel implements Renderable, GuiEventListener, Narra
 
     // [New] 포커스 상태 관리 변수
     private boolean focused = false;
-
+    public boolean visible = true;
     public EditorPanel(String title) {
         this.title = title;
     }
@@ -33,15 +33,19 @@ public abstract class EditorPanel implements Renderable, GuiEventListener, Narra
 
     @Override
     public void render(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTick) {
+        // [New] 보이지 않는 상태면 렌더링 중단
+        if (!visible) return;
+
         // 배경
         guiGraphics.fill(x, y, x + width, y + height, EditorTheme.COLOR_PANEL);
-
-        // [수정됨] GuiUtils를 사용하여 테두리 그리기
+        // 테두리
         GuiUtils.drawBorder(guiGraphics, x, y, width, height, EditorTheme.COLOR_BORDER);
 
-        // 타이틀
-        guiGraphics.drawString(mc.font, this.title, x + EditorTheme.PADDING, y + EditorTheme.PADDING, EditorTheme.COLOR_TEXT_HEADER, EditorTheme.FONT_SHADOW);
-        guiGraphics.hLine(x, x + width, y + 20, EditorTheme.COLOR_BORDER);
+        // 타이틀 (내용이 있을 때만)
+        if (this.title != null && !this.title.isEmpty()) {
+            guiGraphics.drawString(mc.font, this.title, x + EditorTheme.PADDING, y + EditorTheme.PADDING, EditorTheme.COLOR_TEXT_HEADER, EditorTheme.FONT_SHADOW);
+            guiGraphics.hLine(x, x + width, y + 20, EditorTheme.COLOR_BORDER);
+        }
 
         renderContent(guiGraphics, mouseX, mouseY, partialTick);
     }
@@ -61,16 +65,27 @@ public abstract class EditorPanel implements Renderable, GuiEventListener, Narra
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        // [New] 안 보이면 클릭도 안 됨
+        if (!visible) return false;
+
         if (isMouseOver(mouseX, mouseY)) {
             setFocused(true);
-            return true; // 이벤트를 여기서 소비함
+            return true;
         }
         setFocused(false);
         return false;
     }
 
     @Override
+    public boolean mouseDragged(double mouseX, double mouseY, int button, double dragX, double dragY) {
+        if (!visible) return false;
+        return false; // 기본적으로 드래그 처리 안 함 (자식에서 오버라이드)
+    }
+
+    @Override
     public boolean isMouseOver(double mouseX, double mouseY) {
+        // [New] 안 보이면 마우스가 위에 있어도 무시
+        if (!visible) return false;
         return mouseX >= x && mouseX <= x + width && mouseY >= y && mouseY <= y + height;
     }
 

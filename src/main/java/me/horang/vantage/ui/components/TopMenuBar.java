@@ -1,6 +1,7 @@
 package me.horang.vantage.ui.components;
 
 import me.horang.vantage.ui.EditorTheme;
+import me.horang.vantage.ui.VantageEditorScreen;
 import me.horang.vantage.util.GuiUtils;
 import net.minecraft.client.gui.GuiGraphics;
 
@@ -55,5 +56,25 @@ public class TopMenuBar extends EditorPanel {
         guiGraphics.hLine(x, x + width, y + height - 1, EditorTheme.COLOR_BORDER);
 
         renderContent(guiGraphics, mouseX, mouseY, partialTick);
+    }
+
+    @Override
+    public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        if (!super.isMouseOver(mouseX, mouseY)) return false;
+
+        int startX = 60;
+        int gap = 40;
+        int y = 8;
+
+        // 간단한 좌표 체크 (나중엔 실제 버튼 위젯으로 교체 권장)
+        // "View" 버튼 위치 대략 계산
+        if (GuiUtils.isMouseOver(mouseX, mouseY, startX + gap * 2, 0, 40, 24)) {
+            // View 클릭 -> 아웃라이너 토글
+            VantageEditorScreen.showOutliner = !VantageEditorScreen.showOutliner;
+            // 효과음
+            return true;
+        }
+
+        return super.mouseClicked(mouseX, mouseY, button);
     }
 }

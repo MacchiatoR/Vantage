@@ -32,8 +32,9 @@ public class InputHandler {
         // 조건 수정: VantageEditorScreen이 켜져있거나, 모드가 활성화 상태일 때
         boolean isVantageOpen = mc.screen instanceof VantageEditorScreen;
 
-        if (cam.isActive() && isVantageOpen) {
-            handleCameraMovement(mc);
+        if (cam.isActive()) {
+            cam.tick(); // [New] 이전 좌표 백업
+            if (isVantageOpen) handleCameraMovement(mc);
         }
     }
 
@@ -55,8 +56,8 @@ public class InputHandler {
         // WASD 입력 감지 (GLFW 직접 호출)
         if (InputConstants.isKeyDown(window, GLFW.GLFW_KEY_W)) forward -= 1;
         if (InputConstants.isKeyDown(window, GLFW.GLFW_KEY_S)) forward += 1;
-        if (InputConstants.isKeyDown(window, GLFW.GLFW_KEY_A)) strafe += 1; // 왼쪽
-        if (InputConstants.isKeyDown(window, GLFW.GLFW_KEY_D)) strafe -= 1; // 오른쪽
+        if (InputConstants.isKeyDown(window, GLFW.GLFW_KEY_A)) strafe -= 1; // 왼쪽
+        if (InputConstants.isKeyDown(window, GLFW.GLFW_KEY_D)) strafe += 1; // 오른쪽
         if (InputConstants.isKeyDown(window, GLFW.GLFW_KEY_SPACE)) up += 1;
         if (InputConstants.isKeyDown(window, GLFW.GLFW_KEY_LEFT_SHIFT)) up -= 1;
 

@@ -1,6 +1,7 @@
 package me.horang.vantage.client;
 
 import com.mojang.blaze3d.platform.InputConstants;
+import me.horang.vantage.data.SceneData;
 import me.horang.vantage.ui.VantageEditorScreen;
 import net.minecraft.client.CameraType;
 import net.minecraft.client.KeyMapping;
@@ -34,7 +35,7 @@ public class ClientHandler {
 
             // 1. UI 닫기
             mc.setScreen(null);
-
+            SceneData.get().setAnchor(mc.player.position());
             // 2. 카메라 하이재킹 해제 (원래 시점으로)
             VantageCamera.get().setActive(false);
 
