@@ -6,32 +6,32 @@ import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
-
+import net.neoforged.neoforge.client.event.RenderFrameEvent;
 @EventBusSubscriber(modid = "vantage", value = Dist.CLIENT)
 public class PlaybackManager {
 
     private static boolean isPlaying = false;
     private static SceneData.Connection currentConnection = null;
-    private static float elapsedTime = 0f;
+
+    private static float elapsedTime = 0f; // 누적 재생 시간 (초)
+    private static long lastFrameTime = 0; // 델타 타임 계산용 (나노초)
 
     // 재생 시작
     public static void play() {
         SceneData data = SceneData.get();
         if (data.getNodes().isEmpty()) return;
 
-        // 1. 시작점: 선택된 노드 혹은 첫 번째 노드
         SceneData.Node startNode = data.getSelectedNode();
         if (startNode == null) startNode = data.getNodes().get(0);
 
-        // 2. 연결선 찾기
         currentConnection = data.getConnectionFrom(startNode);
 
         if (currentConnection != null) {
             isPlaying = true;
             elapsedTime = 0f;
-            VantageCamera.get().setActive(true); // 카메라 강제 제어 시작
+            lastFrameTime = System.nanoTime(); // [New] 현재 시간 초기화
 
-            // 시작 순간 카메라 위치 잡기
+            VantageCamera.get().setActive(true);
             updateCamera(0f);
         }
     }
@@ -43,31 +43,44 @@ public class PlaybackManager {
 
     public static boolean isPlaying() { return isPlaying; }
 
+    /**
+     * [Core Fix] 틱(ClientTick) 대신 렌더 프레임(RenderFrameEvent)마다 업데이트
+     * 이렇게 하면 FPS만큼(예: 144Hz) 카메라 위치를 갱신하므로 극도로 부드럽습니다.
+     */
     @SubscribeEvent
-    public static void onClientTick(ClientTickEvent.Post event) { // [Fix] .Post 이벤트 사용
+    public static void onRenderTick(RenderFrameEvent.Pre event) {
         if (!isPlaying || currentConnection == null) return;
 
-        // 프레임당 시간 더하기 (초 단위)
-        elapsedTime += 0.05f; // 1 tick = 0.05 sec
+        // 1. 델타 타임 계산 (실제 흐른 시간, 초 단위)
+        long currentTime = System.nanoTime();
+        float deltaTime = (currentTime - lastFrameTime) / 1_000_000_000.0f;
+        lastFrameTime = currentTime;
 
+        // 프레임 드랍 방지 (최대 0.1초 제한)
+        if (deltaTime > 0.1f) deltaTime = 0.1f;
+
+        elapsedTime += deltaTime;
+
+        // 2. 구간 종료 체크
         if (elapsedTime >= currentConnection.duration) {
-            // 해당 구간 종료 -> 다음 구간으로
             float overflow = elapsedTime - currentConnection.duration;
             SceneData.Node nextNode = currentConnection.end;
-
-            // 다음 연결선 찾기
             currentConnection = SceneData.get().getConnectionFrom(nextNode);
 
             if (currentConnection != null) {
-                elapsedTime = overflow; // 남은 시간 이월
+                elapsedTime = overflow;
             } else {
-                // 더 이상 갈 곳이 없음 -> 종료
-                stop();
-                return;
+                // 종료 시 정확히 마지막 위치로 이동 후 정지
+                elapsedTime = (currentConnection != null) ? currentConnection.duration : 0;
+                if (currentConnection == null) {
+                    updateCamera(1.0f); // 마지막 노드 위치 적용
+                    stop();
+                    return;
+                }
             }
         }
 
-        // 보간 계산
+        // 3. 보간 비율 계산
         float t = elapsedTime / currentConnection.duration;
         updateCamera(t);
     }
@@ -75,38 +88,28 @@ public class PlaybackManager {
     private static void updateCamera(float t) {
         if (currentConnection == null) return;
 
+        SceneData data = SceneData.get();
         SceneData.Node start = currentConnection.start;
         SceneData.Node end = currentConnection.end;
 
-        Vec3 pos;
+        // [Fix 1] 위치 계산: getPointOnConnection 사용
+        // 이 메서드 내부에서 Easing(속도 조절)과 Interpolation(직선/곡선)을 모두 처리합니다.
+        Vec3 pos = SceneData.getPointOnConnection(currentConnection, t, data);
 
-        // [Fix] Tension이 0보다 크면 곡선 이동, 아니면 직선 이동
-        if (currentConnection.tension > 0.001f) {
-            SceneData data = SceneData.get();
+        // [Fix 2] 회전 보간: Roll 추가 및 Easing 적용 고려
+        // (참고: SceneData.getPointOnConnection은 위치에 Easing을 적용하지만,
+        //  여기서 t는 선형입니다. 회전 속도도 이동 속도와 맞추려면 Easing된 t가 필요합니다.
+        //  완벽한 동기화를 위해선 SceneData의 applyEasing을 public으로 열어서 사용해야 하지만,
+        //  여기선 일단 선형 t를 사용하여 부드럽게 회전시킵니다.)
 
-            // P0: 이전 노드 (없으면 현재 시작점 사용)
-            SceneData.Connection prevConn = data.getConnectionTo(start);
-            Vec3 p0 = (prevConn != null) ? prevConn.start.position : start.position;
-
-            // P3: 다음 노드 (없으면 현재 끝점 사용)
-            SceneData.Connection nextConn = data.getConnectionFrom(end);
-            Vec3 p3 = (nextConn != null) ? nextConn.end.position : end.position;
-
-            // 스플라인 계산
-            pos = SceneData.getSplinePoint(t, p0, start.position, end.position, p3);
-        } else {
-            // 직선 이동 (Linear Interpolation)
-            pos = start.position.lerp(end.position, t);
-        }
-
-        // 회전 보간 (회전은 선형 유지)
         float yaw = rotLerp(start.yaw, end.yaw, t);
         float pitch = rotLerp(start.pitch, end.pitch, t);
+        float roll = rotLerp(start.roll, end.roll, t); // [New] Roll도 보간
 
-        VantageCamera.get().setTransform(pos, yaw, pitch, 0f);
+        // 카메라 업데이트
+        VantageCamera.get().setTransform(pos, yaw, pitch, roll);
     }
 
-    // 각도 보간 유틸
     private static float rotLerp(float start, float end, float t) {
         float diff = end - start;
         while (diff < -180.0F) diff += 360.0F;

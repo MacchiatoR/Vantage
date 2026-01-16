@@ -8,6 +8,7 @@ import me.horang.vantage.ui.components.*;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
+import org.lwjgl.glfw.GLFW;
 
 public class VantageEditorScreen extends Screen {
 
@@ -108,25 +109,78 @@ public class VantageEditorScreen extends Screen {
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
-        // 1. UI 클릭 처리
-        // super.mouseClicked가 true를 반환하면(버튼 클릭 등), 즉시 종료하여 월드 조작 방지
+        // 1. 마인크래프트 기본 위젯(슬라이더, 버튼 등) 클릭 처리
+        // 내부 컴포넌트가 이벤트를 소비했다면(true), 여기서 중단합니다.
         if (super.mouseClicked(mouseX, mouseY, button)) {
             return true;
         }
 
-        if (SceneData.get().getTool() == SceneData.ToolMode.SELECT && GizmoSystem.handlePress(button, mouseX, mouseY)) {
-            wasDragging = true; // 중요: 즉시 드래그 모드로 인식
+        // 2. 커스텀 UI 패널 클릭 감지 (패널 위를 클릭했을 때 월드가 클릭되는 것을 방지)
+        // 패널 내부의 로직(Outliner 클릭 등)은 각 패널의 mouseClicked에서 이미 처리되었거나,
+        // super.mouseClicked가 처리하지 못한 배경 클릭 등을 여기서 막습니다.
+        if (isMouseOverUI(mouseX, mouseY)) {
             return true;
         }
 
-        // 2. 월드 조작 (UI 밖 클릭)
-        if (!isMouseOverUI(mouseX, mouseY)) {
-            if (button == 0) {
-                isCameraRotating = true;
-                wasDragging = false;
+        SceneData data = SceneData.get();
+        boolean isLeftClick = (button == 0);
+
+        // 3. SELECT 모드일 때의 로직 (기즈모 및 노드 선택)
+        if (data.getTool() == SceneData.ToolMode.SELECT && isLeftClick) {
+
+            // A. 기즈모(화살표) 클릭 체크
+            // 기즈모를 클릭했다면 드래그 모드로 진입하고 종료
+            if (GizmoSystem.handlePress(button, mouseX, mouseY)) {
+                wasDragging = true;
                 return true;
             }
+
+            // B. 3D 월드 노드 클릭 체크 (Raycast)
+            SceneData.Node hitNode = WorldRenderer.raycastNodes(mouseX, mouseY);
+
+            if (hitNode != null) {
+                boolean isCtrl = Screen.hasControlDown(); // Ctrl 키 상태
+                boolean isShift = Screen.hasShiftDown();  // Shift 키 상태
+
+                if (isCtrl) {
+                    // [CTRL] 토글 선택 (선택됨 -> 해제, 안됨 -> 선택)
+                    data.toggleNodeSelection(hitNode);
+                }
+                else if (isShift) {
+                    // [SHIFT] 범위 선택 (마지막 선택된 노드부터 현재까지)
+                    data.selectRange(hitNode);
+                }
+                else {
+                    // [일반 클릭]
+                    // 만약 이미 선택된 노드를 클릭했다면? -> 드래그 준비일 수 있으므로 선택을 즉시 해제하지 않음
+                    // 만약 선택되지 않은 노드를 클릭했다면? -> 단일 선택으로 변경
+                    if (!data.isSelected(hitNode)) {
+                        data.selectNode(hitNode, false); // false = 기존 선택 모두 해제하고 얘만 선택
+                    } else {
+                        // 이미 선택된 그룹 중 하나를 클릭함.
+                        // (이후 mouseDragged가 발생하면 다 같이 이동,
+                        //  mouseReleased가 발생하면 얘만 남기고 나머지 해제하는 로직이 필요할 수 있음.
+                        //  여기서는 단순하게 활성 노드(ActiveNode)만 갱신해줍니다.)
+                        data.selectNode(hitNode, true); // true = 기존 선택 유지
+                    }
+                }
+                return true; // 노드를 클릭했으므로 카메라 회전 등으로 넘어가지 않음
+            }
         }
+
+        // 4. 월드 빈 공간 클릭 처리 (카메라 회전 시작)
+        // UI도 아니고, 기즈모도 아니고, 노드도 아닌 허공을 클릭했을 때
+        if (isLeftClick) {
+            // 허공을 클릭하면 선택 해제 (단, Ctrl/Shift가 없을 때만)
+            if (!Screen.hasControlDown() && !Screen.hasShiftDown()) {
+                data.clearSelection();
+            }
+
+            isCameraRotating = true;
+            wasDragging = false;
+            return true;
+        }
+
         return false;
     }
 
@@ -188,6 +242,24 @@ public class VantageEditorScreen extends Screen {
         VantageCamera.get().moveForward(wheelDelta * speed);
 
         return true;
+    }
+
+    @Override
+    public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        // [New] 'R' 키로 기즈모 모드 전환 (Translate <-> Rotate)
+        if (keyCode == GLFW.GLFW_KEY_R) {
+            GizmoSystem.toggleMode();
+            return true;
+        }
+
+        // 기존 UI 패널 입력 처리
+        if (topMenuBar.keyPressed(keyCode, scanCode, modifiers)) return true;
+        if (toolBarPanel.keyPressed(keyCode, scanCode, modifiers)) return true;
+        if (outlinerPanel.keyPressed(keyCode, scanCode, modifiers)) return true;
+        if (inspectorPanel.keyPressed(keyCode, scanCode, modifiers)) return true;
+        if (timelinePanel.keyPressed(keyCode, scanCode, modifiers)) return true;
+
+        return super.keyPressed(keyCode, scanCode, modifiers);
     }
 
     // --- Lifecycle ---

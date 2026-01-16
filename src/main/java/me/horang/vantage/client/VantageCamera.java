@@ -14,6 +14,7 @@ import net.neoforged.neoforge.client.event.ViewportEvent;
  * Mixin과 WorldRenderer는 이 클래스의 데이터를 참조하여 화면을 그린다.
  * 틱(Tick) 단위 업데이트와 프레임(Frame) 단위 보간을 지원한다.
  */
+
 @EventBusSubscriber(modid = "vantage", value = Dist.CLIENT)
 public class VantageCamera {
 
@@ -69,10 +70,20 @@ public class VantageCamera {
         this.pitch = pitch;
         this.roll = roll;
 
+        // 순간이동이므로 이전 위치도 현재 위치로 강제 동기화 (잔상 제거)
         this.prevPosition = pos;
         this.prevYaw = yaw;
         this.prevPitch = pitch;
         this.prevRoll = roll;
+    }
+
+    // [New] 재생용: 부드러운 이동 (보간 유지)
+    // 이 메서드는 prevPosition을 건드리지 않습니다! (tick() 메서드가 처리함)
+    public void setPlaybackState(Vec3 pos, float yaw, float pitch, float roll) {
+        this.position = pos;
+        this.yaw = yaw;
+        this.pitch = pitch;
+        this.roll = roll;
     }
 
     // [New] FOV 설정 메서드
@@ -208,5 +219,25 @@ public class VantageCamera {
         if (motion.lengthSqr() > 0) {
             this.position = this.position.add(motion.normalize().scale(speed));
         }
+    }
+
+    public Vec3 getPosition() {
+        return this.position;
+    }
+
+    public float getYaw() {
+        return this.yaw;
+    }
+
+    public float getPitch() {
+        return this.pitch;
+    }
+
+    public float getRoll() {
+        return this.roll;
+    }
+
+    public double getFov() {
+        return this.fov;
     }
 }

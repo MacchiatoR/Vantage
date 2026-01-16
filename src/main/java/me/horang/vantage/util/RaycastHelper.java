@@ -1,13 +1,16 @@
 package me.horang.vantage.util;
 
 import com.mojang.logging.LogUtils;
+import com.mojang.math.Axis;
 import me.horang.vantage.client.VantageCamera;
 import net.minecraft.client.Minecraft;
+import net.minecraft.util.Mth;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
+import org.joml.Quaternionf;
 import org.joml.Vector3f;
 import org.joml.Vector4f;
 import org.slf4j.Logger;
@@ -116,10 +119,53 @@ public class RaycastHelper {
      */
     public static Ray getMouseRay(double mouseX, double mouseY) {
         Minecraft mc = Minecraft.getInstance();
-        RayData data = calculateRay(mouseX, mouseY, mc); // 기존 private 메서드 재활용
-        // Vector3f -> Vec3 변환
-        return new Ray(data.start, new Vec3(data.dir.x, data.dir.y, data.dir.z));
+        int winWidth = mc.getWindow().getWidth();
+        int winHeight = mc.getWindow().getHeight();
+
+        float partialTick = mc.getTimer().getGameTimeDeltaPartialTick(true);
+        Vec3 camPos = VantageCamera.get().getInterpolatedPosition(partialTick);
+        float xRot = VantageCamera.get().getInterpolatedXRot(partialTick);
+        float yRot = VantageCamera.get().getInterpolatedYRot(partialTick);
+        float roll = VantageCamera.get().getInterpolatedRoll(partialTick);
+        double fov = VantageCamera.get().getInterpolatedFov(partialTick);
+
+        // 1. NDC 변환
+        float ndcX = (float) (2.0 * mouseX / winWidth - 1.0);
+        float ndcY = (float) (1.0 - 2.0 * mouseY / winHeight);
+
+        // 2. 행렬 계산 (표준 JOML 방식)
+        float aspectRatio = (float) winWidth / winHeight;
+
+        // Projection
+        Matrix4f projection = new Matrix4f();
+        projection.perspective((float) Math.toRadians(fov), aspectRatio, 0.05f, 1000.0f);
+
+        // View (Camera Rotation)
+        // MC 좌표계: +Z=South, +Y=Up.
+        // View Matrix는 카메라 변환의 역행렬입니다.
+        // 순서: Roll -> Pitch -> Yaw
+        Matrix4f view = new Matrix4f();
+        view.identity();
+        view.rotate(Axis.ZP.rotationDegrees(roll));
+        view.rotate(Axis.XP.rotationDegrees(xRot));
+        view.rotate(Axis.YP.rotationDegrees(yRot + 180.0f));
+
+        // 3. 결합 및 역행렬
+        Matrix4f invViewProj = new Matrix4f(projection).mul(view).invert();
+
+        // 4. Unproject
+        Vector4f nearVec = new Vector4f(ndcX, ndcY, -1.0f, 1.0f).mul(invViewProj);
+        Vector4f farVec = new Vector4f(ndcX, ndcY, 1.0f, 1.0f).mul(invViewProj);
+
+        if (nearVec.w() != 0) nearVec.div(nearVec.w());
+        if (farVec.w() != 0) farVec.div(farVec.w());
+
+        // 5. 방향 계산
+        Vector3f dir = new Vector3f(farVec.x() - nearVec.x(), farVec.y() - nearVec.y(), farVec.z() - nearVec.z()).normalize();
+
+        return new Ray(camPos, new Vec3(dir));
     }
+
 
     /**
      * Ray와 선분(Start-End) 사이의 최소 거리를 구합니다.

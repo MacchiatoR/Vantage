@@ -4,8 +4,10 @@ import me.horang.vantage.data.SceneData;
 import me.horang.vantage.ui.EditorTheme;
 import me.horang.vantage.util.GuiUtils;
 import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.screens.Screen;
 
 import java.util.List;
+
 public class OutlinerPanel extends EditorPanel {
 
     private static final int ITEM_HEIGHT = 15;
@@ -35,41 +37,33 @@ public class OutlinerPanel extends EditorPanel {
         for (int i = 0; i < nodes.size(); i++) {
             SceneData.Node node = nodes.get(i);
 
-            // 1. 노드 그리기
-            drawItem(guiGraphics, mouseX, mouseY, currentY, "Node " + (i + 1), node, null);
+            // [Modified] 다중 선택 여부 확인
+            boolean isNodeSelected = data.isSelected(node);
+
+            drawItem(guiGraphics, mouseX, mouseY, currentY, "Node " + (i + 1), node, null, isNodeSelected);
             currentY += ITEM_HEIGHT;
 
-            // 2. 해당 노드에서 시작하는 연결선(Line)이 있다면 그리기
             SceneData.Connection conn = data.getConnectionFrom(node);
             if (conn != null) {
-                // 노드보다 약간 들여쓰기해서 종속 관계 표현
-                drawItem(guiGraphics, mouseX, mouseY, currentY, "  └ Line", null, conn);
+                boolean isConnSelected = (data.getSelectedConnection() == conn);
+                drawItem(guiGraphics, mouseX, mouseY, currentY, "  └ Line", null, conn, isConnSelected);
                 currentY += ITEM_HEIGHT;
             }
-
-            // 화면 밖으로 나가면 그리기 중단 (최적화)
             if (currentY > this.y + this.height) break;
         }
     }
 
     // 아이템(노드 혹은 라인) 하나를 그리는 헬퍼 메서드
-    private void drawItem(GuiGraphics g, int mx, int my, int y, String label, SceneData.Node node, SceneData.Connection conn) {
+    private void drawItem(GuiGraphics g, int mx, int my, int y, String label, SceneData.Node node, SceneData.Connection conn, boolean isSelected) {
         SceneData data = SceneData.get();
 
-        // 이 아이템이 선택되었는지 확인
-        boolean isSelected = (node != null && data.getSelectedNode() == node) ||
-                (conn != null && data.getSelectedConnection() == conn);
-
-        // 이 아이템에 마우스가 올라갔는지 확인
         boolean isHovered = GuiUtils.isMouseOver(mx, my, this.x, y, this.width, ITEM_HEIGHT);
 
         // 1. 배경 그리기
         if (isSelected) {
-            // 선택됨: 강조색
             g.fill(this.x + 2, y, this.x + this.width - 2, y + ITEM_HEIGHT, EditorTheme.COLOR_ACCENT & 0x88FFFFFF);
             GuiUtils.drawBorder(g, this.x + 2, y, this.width - 4, ITEM_HEIGHT, EditorTheme.COLOR_ACCENT);
         } else if (isHovered) {
-            // 호버됨: 연한 회색
             g.fill(this.x + 2, y, this.x + this.width - 2, y + ITEM_HEIGHT, 0x22FFFFFF);
         }
 
@@ -105,18 +99,53 @@ public class OutlinerPanel extends EditorPanel {
         SceneData data = SceneData.get();
         List<SceneData.Node> nodes = data.getNodes();
 
+        // 키보드 상태 확인 (Screen 클래스 정적 메서드 사용)
+        boolean isCtrl = Screen.hasControlDown();
+        boolean isShift = Screen.hasShiftDown();
+
         for (SceneData.Node node : nodes) {
-            // 1. 노드 영역 클릭 체크
-            if (checkClick(mouseX, mouseY, currentY, node, null)) return true;
+            // 1. 노드 클릭 체크
+            if (GuiUtils.isMouseOver(mouseX, mouseY, this.x, currentY, this.width, ITEM_HEIGHT)) {
+                // 삭제 버튼
+                int delBtnX = this.x + this.width - 15;
+                if (GuiUtils.isMouseOver(mouseX, mouseY, delBtnX, currentY + 2, 10, 10)) {
+                    data.removeNode(node);
+                    return true;
+                }
+
+                // [Modified] 선택 로직 분기
+                if (isCtrl) {
+                    data.toggleNodeSelection(node);
+                } else if (isShift) {
+                    data.selectRange(node);
+                } else {
+                    // 이미 선택된 노드를 클릭했고 드래그 의도일 수 있으니,
+                    // 단일 선택으로 바꾸지 않고 유지만 하는 로직이 필요할 수도 있지만,
+                    // 아웃라이너에서는 보통 클릭 시 바로 선택 변경이 자연스러움.
+                    data.selectNode(node, false); // false = 기존 선택 초기화 후 선택
+                }
+                return true;
+            }
             currentY += ITEM_HEIGHT;
 
-            // 2. 라인 영역 클릭 체크
+            // 2. 라인 클릭 체크
             SceneData.Connection conn = data.getConnectionFrom(node);
             if (conn != null) {
-                if (checkClick(mouseX, mouseY, currentY, null, conn)) return true;
+                if (GuiUtils.isMouseOver(mouseX, mouseY, this.x, currentY, this.width, ITEM_HEIGHT)) {
+                    // 라인은 다중 선택 지원 안 함 (단일 선택)
+                    data.clearSelection(); // 노드 선택 해제
+                    data.setSelectedConnection(conn);
+                    return true;
+                }
                 currentY += ITEM_HEIGHT;
             }
         }
+
+        // 빈 공간 클릭 시 선택 해제
+        if (mouseY > currentY) {
+            data.clearSelection();
+        }
+
         return false;
     }
 

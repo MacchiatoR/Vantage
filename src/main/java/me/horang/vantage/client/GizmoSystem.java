@@ -3,6 +3,7 @@ package me.horang.vantage.client;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.*;
 import me.horang.vantage.data.SceneData;
+import me.horang.vantage.util.GuiUtils;
 import me.horang.vantage.util.RaycastHelper;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GameRenderer;
@@ -10,123 +11,477 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
+import com.mojang.blaze3d.vertex.*;
+import org.lwjgl.opengl.GL11;
 
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
-
 public class GizmoSystem {
 
-    public enum Axis { NONE, X, Y, Z, ALL }
+    public enum Axis { NONE, MOVE_X, MOVE_Y, MOVE_Z, MOVE_ALL, ROT_X, ROT_Y, ROT_Z }
+    public enum GizmoMode { TRANSLATE, ROTATE }
 
+    private static GizmoMode currentMode = GizmoMode.TRANSLATE;
     private static Axis hoveringAxis = Axis.NONE;
     private static Axis draggingAxis = Axis.NONE;
 
-    // 비주얼 설정
-    private static final float ARM_LENGTH = 1.0f;
-    private static final float ARM_THICKNESS = 0.05f;
-    private static final float CENTER_SIZE = 0.25f;
+    // [해결: isDragging 필드 추가]
+    private static boolean isDragging = false;
 
-    // --- 드래그 로직용 변수 (변경됨) ---
-    // 드래그 시작 시점의 노드 위치와 클릭 위치를 저장하여 '차이(Delta)'를 계산합니다.
-    private static Vec3 startNodePos = Vec3.ZERO; // 드래그 시작 시 노드 위치
-    private static Vec3 startHitPos = Vec3.ZERO;  // 드래그 시작 시 가상 평면 클릭 위치
+    // --- 비주얼 설정 ---
+    private static final float ARROW_LENGTH = 0.8f;
+    private static final float GIZMO_THICKNESS = 0.1f;
+    private static final float ARROW_TIP_SIZE = 0.2f;
+    private static final float RING_RADIUS = 1.0f;
+    private static final float CENTER_SIZE = 0.15f;
 
-    // --- Rendering (기존과 동일) ---
-    public static void render(PoseStack stack, Vec3 camPos, double mouseX, double mouseY) {
+    // --- 히트박스 설정 ---
+    private static final double HIT_RADIUS_ARROW = 0.15;
+    private static final double HIT_RADIUS_RING = 0.4;
+
+    // --- 드래그 변수 ---
+    private static Vec3 dragStartPos = Vec3.ZERO;
+    private static Vec3 dragStartHit = Vec3.ZERO;
+    private static Vec3 lastDragHitVector = Vec3.ZERO;
+    private static boolean hasRotated = false;
+
+    private static Vec3 markerStartLocal = null;
+    private static Vec3 markerCurrentLocal = null;
+    private static Vec3 dragPlaneNormal = new Vec3(0, 1, 0);
+
+    // --- 정렬용 헬퍼 ---
+    private static class RenderPart implements Comparable<RenderPart> {
+        Axis axis;
+        double distSq;
+        public RenderPart(Axis a, double d) { this.axis = a; this.distSq = d; }
+        @Override
+        public int compareTo(RenderPart o) { return Double.compare(o.distSq, this.distSq); }
+    }
+
+    // --- Public Interface ---
+    public static void toggleMode() {
+        currentMode = (currentMode == GizmoMode.TRANSLATE) ? GizmoMode.ROTATE : GizmoMode.TRANSLATE;
+        markerStartLocal = null;
+        markerCurrentLocal = null;
+    }
+    public static GizmoMode getMode() { return currentMode; }
+    public static boolean isHovering() { return hoveringAxis != Axis.NONE; }
+    public static boolean isDragging() { return isDragging; } // Getter 수정
+
+    // =================================================================================
+    // 1. Rendering
+    // =================================================================================
+
+    public static void render(PoseStack stack, Vec3 camPos, double ignoredMouseX, double ignoredMouseY) {
         SceneData.Node selected = SceneData.get().getSelectedNode();
         if (selected == null) return;
 
-        if (draggingAxis == Axis.NONE) {
-            updateHovering(mouseX, mouseY, selected.position);
+        Minecraft mc = Minecraft.getInstance();
+        double mouseX = mc.mouseHandler.xpos();
+        double mouseY = mc.mouseHandler.ypos();
+
+        if (!isDragging) {
+            updateHovering(mouseX, mouseY, selected.position, camPos);
         }
+
+        RenderSystem.disableDepthTest();
+        RenderSystem.disableCull();
+        RenderSystem.setShader(GameRenderer::getPositionColorShader);
+        RenderSystem.enableBlend();
+        RenderSystem.defaultBlendFunc();
 
         stack.pushPose();
         stack.translate(selected.position.x - camPos.x, selected.position.y - camPos.y, selected.position.z - camPos.z);
 
-        // 1. Depth Test는 끕니다 (벽 뚫고 보이기 위함)
-        RenderSystem.disableDepthTest();
-        RenderSystem.setShader(GameRenderer::getPositionColorShader);
+        if (currentMode == GizmoMode.TRANSLATE) {
+            boolean hoverAll = (hoveringAxis == Axis.MOVE_ALL || draggingAxis == Axis.MOVE_ALL);
+            renderBox(stack, -CENTER_SIZE/2, -CENTER_SIZE/2, -CENTER_SIZE/2, CENTER_SIZE/2, CENTER_SIZE/2, CENTER_SIZE/2, hoverAll ? 0xAAFFFFFF : 0x44FFFFFF);
 
-        // 2. 중앙 박스 그리기 (항상 가장 안쪽에 있으므로 먼저 그립니다)
-        boolean hoverAll = (hoveringAxis == Axis.ALL || draggingAxis == Axis.ALL);
-        renderBox(stack, -CENTER_SIZE, -CENTER_SIZE, -CENTER_SIZE, CENTER_SIZE, CENTER_SIZE, CENTER_SIZE,
-                hoverAll ? 0xAAFFFFFF : 0x44FFFFFF);
+            List<RenderPart> parts = new ArrayList<>();
+            parts.add(new RenderPart(Axis.MOVE_X, getDistanceToAxis(selected.position, Axis.MOVE_X, camPos)));
+            parts.add(new RenderPart(Axis.MOVE_Y, getDistanceToAxis(selected.position, Axis.MOVE_Y, camPos)));
+            parts.add(new RenderPart(Axis.MOVE_Z, getDistanceToAxis(selected.position, Axis.MOVE_Z, camPos)));
+            Collections.sort(parts);
 
-        // 3. [Fix] 그리기 순서 정렬 (멀리 있는 축 -> 가까이 있는 축)
-        // 카메라로부터 각 축의 끝점까지 거리를 계산해서 정렬합니다.
-        List<Axis> axes = new ArrayList<>(Arrays.asList(Axis.X, Axis.Y, Axis.Z));
-
-        // 정렬 기준: (노드위치 + 축방향)과 카메라 사이의 거리
-        // 거리가 큰(먼) 순서대로 정렬해야 함 (내림차순)
-        axes.sort((a, b) -> {
-            Vec3 posA = getAxisEndPos(a);
-            Vec3 posB = getAxisEndPos(b);
-            // 로컬 좌표계 기준이므로 카메라 위치도 로컬로 변환해서 계산하거나,
-            // 단순히 현재 stack이 이동된 상태이므로 (0,0,0)이 노드 위치임을 감안해야 함.
-            // 하지만 여기선 간단히 camPos와의 절대 거리로 비교합니다.
-
-            double distA = camPos.distanceToSqr(selected.position.add(posA));
-            double distB = camPos.distanceToSqr(selected.position.add(posB));
-            return Double.compare(distB, distA); // 먼 거 먼저 (내림차순)
-        });
-
-        // 4. 정렬된 순서대로 렌더링
-        for (Axis axis : axes) {
-            boolean isHoveringOrDragging = (hoveringAxis == axis || draggingAxis == axis);
-            int color;
-            switch (axis) {
-                case X: color = 0xFFFF0000; break;
-                case Y: color = 0xFF00FF00; break;
-                default: color = 0xFF0000FF; break; // Z
+            for (RenderPart part : parts) {
+                float flip = getFlipFactor(part.axis, camPos.subtract(selected.position));
+                renderBillboardArrow(stack, part.axis, getAxisColor(part.axis), camPos.subtract(selected.position), flip);
             }
-            renderArrow(stack, axis, color, isHoveringOrDragging);
+        } else {
+            List<RenderPart> parts = new ArrayList<>();
+            parts.add(new RenderPart(Axis.ROT_X, getDistanceToAxis(selected.position, Axis.ROT_X, camPos)));
+            parts.add(new RenderPart(Axis.ROT_Y, getDistanceToAxis(selected.position, Axis.ROT_Y, camPos)));
+            parts.add(new RenderPart(Axis.ROT_Z, getDistanceToAxis(selected.position, Axis.ROT_Z, camPos)));
+            Collections.sort(parts);
+
+            for (RenderPart part : parts) {
+                renderThickRing(stack, part.axis, getAxisColor(part.axis));
+            }
+            renderRotationMarkers(stack);
         }
 
-        RenderSystem.enableDepthTest();
         stack.popPose();
+        RenderSystem.enableDepthTest();
+        RenderSystem.enableCull();
     }
 
-    // [New] 정렬을 위해 각 축의 끝점 좌표를 반환하는 헬퍼 메서드
-    private static Vec3 getAxisEndPos(Axis axis) {
-        switch (axis) {
-            case X: return new Vec3(ARM_LENGTH, 0, 0);
-            case Y: return new Vec3(0, ARM_LENGTH, 0);
-            case Z: return new Vec3(0, 0, ARM_LENGTH);
-            default: return Vec3.ZERO;
+    private static void renderRotationMarkers(PoseStack stack) {
+        if (draggingAxis == Axis.NONE || markerStartLocal == null || markerCurrentLocal == null) return;
+
+        int color = getAxisColor(draggingAxis);
+        int r = (color >> 16) & 0xFF;
+        int g = (color >> 8) & 0xFF;
+        int b = (color) & 0xFF;
+        int a = 100;
+
+        double startAngle = getAngleFromAxis(draggingAxis, markerStartLocal);
+        double currentAngle = getAngleFromAxis(draggingAxis, markerCurrentLocal);
+        double diff = currentAngle - startAngle;
+
+        while (diff > Math.PI) diff -= 2 * Math.PI;
+        while (diff < -Math.PI) diff += 2 * Math.PI;
+
+        Tesselator tesselator = Tesselator.getInstance();
+        BufferBuilder buffer = tesselator.begin(VertexFormat.Mode.TRIANGLE_FAN, DefaultVertexFormat.POSITION_COLOR);
+        Matrix4f mat = stack.last().pose();
+
+        buffer.addVertex(mat, 0, 0, 0).setColor(r, g, b, a);
+
+        int segments = Math.max(2, (int)(Math.abs(Math.toDegrees(diff)) / 5.0));
+        for (int i = 0; i <= segments; i++) {
+            double t = (double) i / segments;
+            double angle = startAngle + (diff * t);
+            Vec3 pos = getVectorFromAngle(draggingAxis, angle, RING_RADIUS);
+            buffer.addVertex(mat, (float)pos.x, (float)pos.y, (float)pos.z).setColor(r, g, b, a);
+        }
+        try { BufferUploader.drawWithShader(buffer.buildOrThrow()); } catch (Exception e) {}
+        GuiUtils.renderLine(stack, Vec3.ZERO, markerCurrentLocal, 0xFFFFFFFF);
+    }
+
+    // =================================================================================
+    // 2. Interaction Logic
+    // =================================================================================
+
+    public static boolean handlePress(int button, double ignoredMouseX, double ignoredMouseY) {
+        Minecraft mc = Minecraft.getInstance();
+        double mouseX = mc.mouseHandler.xpos();
+        double mouseY = mc.mouseHandler.ypos();
+
+        if (button != 0 || hoveringAxis == Axis.NONE) return false;
+
+        draggingAxis = hoveringAxis;
+        isDragging = true;
+
+        SceneData.Node node = SceneData.get().getSelectedNode();
+        if (node == null) return false;
+
+        dragStartPos = node.position;
+        hasRotated = false;
+
+        // [핵심 수정 1] 드래그에 사용할 평면 법선(Normal)을 미리 결정하고 저장합니다.
+        // 드래그 도중 카메라가 미세하게 움직여도 평면이 고정되도록 합니다.
+        if (isMoveAxis(draggingAxis)) {
+            dragPlaneNormal = VantageCamera.get().getForwardVector();
+        } else {
+            dragPlaneNormal = getAxisVector(draggingAxis);
+        }
+
+        Vec3 hit = getRayPlaneIntersection(mouseX, mouseY, dragPlaneNormal, node.position);
+
+        if (hit != null) {
+            dragStartHit = hit;
+
+            if (!isMoveAxis(draggingAxis)) {
+                // 회전 마커 로직 (기존과 동일)
+                Vec3 axisVec = getAxisVector(draggingAxis);
+                Vec3 toHit = hit.subtract(node.position);
+                Vec3 projectedToHit = toHit.subtract(axisVec.scale(toHit.dot(axisVec)));
+
+                if (projectedToHit.lengthSqr() < 1e-6) {
+                    if (Math.abs(axisVec.y) < 0.9) projectedToHit = new Vec3(0, 1, 0).cross(axisVec);
+                    else projectedToHit = new Vec3(1, 0, 0).cross(axisVec);
+                }
+                Vec3 dir = projectedToHit.normalize();
+                markerStartLocal = dir.scale(RING_RADIUS);
+                markerCurrentLocal = markerStartLocal;
+                lastDragHitVector = dir;
+            }
+            return true;
+        } else {
+            draggingAxis = Axis.NONE;
+            isDragging = false;
+            return false;
         }
     }
 
-    // (렌더링 헬퍼 메서드들 - renderArrow, renderBox, addBox, addQuad 등은 기존 코드 유지)
-    private static void renderArrow(PoseStack stack, Axis axis, int color, boolean highlight) {
+    public static boolean handleDrag(double ignoredMouseX, double ignoredMouseY) {
+        if (!isDragging) return false;
+
+        // [핵심 수정 2] 매개변수(GUI 좌표) 무시하고, 실제 윈도우 좌표(Raw Mouse) 사용
+        // handlePress와 동일한 좌표계를 사용해야 튀지 않습니다.
+        Minecraft mc = Minecraft.getInstance();
+        double mouseX = mc.mouseHandler.xpos();
+        double mouseY = mc.mouseHandler.ypos();
+
+        SceneData data = SceneData.get();
+        SceneData.Node activeNode = data.getSelectedNode();
+        if (activeNode == null) return false;
+
+        Vec3 prevPos = activeNode.position;
+
+        if (currentMode == GizmoMode.TRANSLATE) {
+            handleMove(mouseX, mouseY, activeNode);
+        } else {
+            handleRotate(mouseX, mouseY, activeNode);
+            return true;
+        }
+
+        // 다중 선택 이동 처리
+        Vec3 newPos = activeNode.position;
+        Vec3 delta = newPos.subtract(prevPos);
+
+        if (delta.lengthSqr() > 0.000001) {
+            for (SceneData.Node node : data.getSelectedNodes()) {
+                if (node == activeNode) continue;
+                node.position = node.position.add(delta);
+            }
+        }
+        return true;
+    }
+
+    private static void handleMove(double mouseX, double mouseY, SceneData.Node node) {
+        // [핵심 수정 3] 저장해둔 dragPlaneNormal 사용 (일관성 유지)
+        Vec3 currentHit = getRayPlaneIntersection(mouseX, mouseY, dragPlaneNormal, dragStartPos);
+
+        if (currentHit != null) {
+            Vec3 delta = currentHit.subtract(dragStartHit);
+            switch (draggingAxis) {
+                // 기존 위치(dragStartPos)에 델타를 더하는 방식은 정확합니다.
+                case MOVE_X: node.position = dragStartPos.add(delta.x, 0, 0); break;
+                case MOVE_Y: node.position = dragStartPos.add(0, delta.y, 0); break;
+                case MOVE_Z: node.position = dragStartPos.add(0, 0, delta.z); break;
+                case MOVE_ALL: node.position = dragStartPos.add(delta); break;
+            }
+        }
+    }
+
+    private static void handleRotate(double mouseX, double mouseY, SceneData.Node node) {
+        Vec3 axisNormal = getAxisVector(draggingAxis);
+        Vec3 currentHit = getRayPlaneIntersection(mouseX, mouseY, axisNormal, node.position);
+        if (currentHit == null) return;
+
+        Vec3 currentDir = currentHit.subtract(node.position).normalize();
+        markerCurrentLocal = currentDir.scale(RING_RADIUS);
+
+        Vec3 cross = lastDragHitVector.cross(currentDir);
+        double dot = lastDragHitVector.dot(currentDir);
+        double signedCross = cross.dot(axisNormal);
+        double deltaDeg = Math.toDegrees(Math.atan2(signedCross, dot));
+
+        if (Math.abs(deltaDeg) > 0.001) {
+            hasRotated = true;
+        }
+
+        switch (draggingAxis) {
+            case ROT_X: node.pitch += (float) deltaDeg; break;
+            case ROT_Y: node.yaw   += (float) deltaDeg; break;
+            case ROT_Z: node.roll  += (float) deltaDeg; break;
+        }
+        lastDragHitVector = currentDir;
+    }
+
+    public static void handleRelease() {
+        draggingAxis = Axis.NONE;
+        isDragging = false;
+    }
+
+    // [해결: 가짜 메서드 제거]
+    // updatePositionFromMouse는 handleMove 로직과 중복되므로,
+    // handleDrag 내부에서 handleMove를 직접 호출하는 방식으로 수정되었습니다.
+
+    // =================================================================================
+    // Helper Methods (나머지는 그대로 유지)
+    // =================================================================================
+
+    public static void handleScroll(double delta) {
+        if (!isHovering() && !isDragging()) return;
+        SceneData.Node node = SceneData.get().getSelectedNode();
+        if (node == null || currentMode != GizmoMode.TRANSLATE) return;
+        Axis axis = (draggingAxis != Axis.NONE) ? draggingAxis : hoveringAxis;
+        if (!isMoveAxis(axis)) return;
+        double speed = 0.5;
+        switch (axis) {
+            case MOVE_X: node.position = node.position.add(delta * speed, 0, 0); break;
+            case MOVE_Y: node.position = node.position.add(0, delta * speed, 0); break;
+            case MOVE_Z: node.position = node.position.add(0, 0, delta * speed); break;
+        }
+    }
+
+    private static void updateHovering(double mouseX, double mouseY, Vec3 nodePos, Vec3 camPos) {
+        RaycastHelper.Ray ray = RaycastHelper.getMouseRay(mouseX, mouseY);
+        if (ray == null) return;
+
+        hoveringAxis = Axis.NONE;
+        double minDist = Double.MAX_VALUE;
+        Vec3 toCam = camPos.subtract(nodePos);
+
+        if (currentMode == GizmoMode.TRANSLATE) {
+            double distC = getBoxIntersect(ray, nodePos, new AABB(-CENTER_SIZE/2, -CENTER_SIZE/2, -CENTER_SIZE/2, CENTER_SIZE/2, CENTER_SIZE/2, CENTER_SIZE/2));
+            if (distC < minDist) { minDist = distC; hoveringAxis = Axis.MOVE_ALL; }
+
+            double distX = getArrowIntersectStrict(ray, nodePos, Axis.MOVE_X, getFlipFactor(Axis.MOVE_X, toCam));
+            if (distX < minDist) { minDist = distX; hoveringAxis = Axis.MOVE_X; }
+
+            double distY = getArrowIntersectStrict(ray, nodePos, Axis.MOVE_Y, getFlipFactor(Axis.MOVE_Y, toCam));
+            if (distY < minDist) { minDist = distY; hoveringAxis = Axis.MOVE_Y; }
+
+            double distZ = getArrowIntersectStrict(ray, nodePos, Axis.MOVE_Z, getFlipFactor(Axis.MOVE_Z, toCam));
+            if (distZ < minDist) { minDist = distZ; hoveringAxis = Axis.MOVE_Z; }
+        } else {
+            double distRotX = getRingIntersectStrict(ray, nodePos, Axis.ROT_X);
+            if (distRotX < minDist) { minDist = distRotX; hoveringAxis = Axis.ROT_X; }
+
+            double distRotY = getRingIntersectStrict(ray, nodePos, Axis.ROT_Y);
+            if (distRotY < minDist) { minDist = distRotY; hoveringAxis = Axis.ROT_Y; }
+
+            double distRotZ = getRingIntersectStrict(ray, nodePos, Axis.ROT_Z);
+            if (distRotZ < minDist) { minDist = distRotZ; hoveringAxis = Axis.ROT_Z; }
+        }
+    }
+
+    private static boolean isMoveAxis(Axis a) { return a == Axis.MOVE_X || a == Axis.MOVE_Y || a == Axis.MOVE_Z || a == Axis.MOVE_ALL; }
+    private static boolean isRotateAxis(Axis a) { return a == Axis.ROT_X || a == Axis.ROT_Y || a == Axis.ROT_Z; }
+
+    private static int getAxisColor(Axis axis) {
+        switch(axis) {
+            case MOVE_X: case ROT_X: return 0xFFFF0000;
+            case MOVE_Y: case ROT_Y: return 0xFF00FF00;
+            case MOVE_Z: case ROT_Z: return 0xFF0000FF;
+            default: return 0xFFFFFFFF;
+        }
+    }
+
+    private static Vec3 getAxisVector(Axis axis) {
+        switch (axis) {
+            case MOVE_X: case ROT_X: return new Vec3(1, 0, 0);
+            case MOVE_Y: case ROT_Y: return new Vec3(0, 1, 0);
+            case MOVE_Z: case ROT_Z: return new Vec3(0, 0, 1);
+            default: return new Vec3(0, 1, 0);
+        }
+    }
+
+    private static double getDistanceToAxis(Vec3 nodePos, Axis axis, Vec3 camPos) {
+        Vec3 dir = getAxisVector(axis);
+        Vec3 toCam = camPos.subtract(nodePos);
+        if (isRotateAxis(axis)) {
+            return nodePos.distanceToSqr(camPos);
+        } else {
+            float flip = getFlipFactor(axis, toCam);
+            Vec3 center = nodePos.add(dir.scale(ARROW_LENGTH * 0.5 * flip));
+            return center.distanceToSqr(camPos);
+        }
+    }
+
+    private static float getFlipFactor(Axis axis, Vec3 toCam) {
+        Vec3 axisDir = getAxisVector(axis);
+        return axisDir.dot(toCam) < 0 ? -1.0f : 1.0f;
+    }
+
+    private static Vec3 getRayPlaneIntersection(double mouseX, double mouseY, Vec3 planeNormal, Vec3 planePoint) {
+        RaycastHelper.Ray ray = RaycastHelper.getMouseRay(mouseX, mouseY);
+        if (ray == null) return null;
+        double denom = ray.dir.dot(planeNormal);
+        if (Math.abs(denom) < 1e-4) return null;
+        double t = planePoint.subtract(ray.origin).dot(planeNormal) / denom;
+        if (t < 0) return null;
+        return ray.origin.add(ray.dir.scale(t));
+    }
+
+    private static double getArrowIntersectStrict(RaycastHelper.Ray ray, Vec3 nodePos, Axis axis, float flip) {
+        Vec3 rawAxis = getAxisVector(axis);
+        Vec3 dir = rawAxis.scale(flip);
+        Vec3 pStart = nodePos.add(dir.scale(CENTER_SIZE * 0.5));
+        Vec3 pEnd = nodePos.add(dir.scale(ARROW_LENGTH));
+        double dist = RaycastHelper.getDistanceFromLine(ray, pStart, pEnd);
+        if (dist < HIT_RADIUS_ARROW) return ray.origin.distanceTo(pStart);
+        return Double.MAX_VALUE;
+    }
+
+    private static double getRingIntersectStrict(RaycastHelper.Ray ray, Vec3 nodePos, Axis axis) {
+        Vec3 planeNormal = getAxisVector(axis);
+        double denom = ray.dir.dot(planeNormal);
+        if (Math.abs(denom) < 1e-6) return Double.MAX_VALUE;
+        double t = nodePos.subtract(ray.origin).dot(planeNormal) / denom;
+        if (t < 0) return Double.MAX_VALUE;
+        Vec3 hitPos = ray.origin.add(ray.dir.scale(t));
+        double distFromCenter = hitPos.distanceTo(nodePos);
+        if (Math.abs(distFromCenter - RING_RADIUS) < HIT_RADIUS_RING) return hitPos.distanceTo(ray.origin);
+        return Double.MAX_VALUE;
+    }
+
+    private static double getBoxIntersect(RaycastHelper.Ray ray, Vec3 offset, AABB localBox) {
+        AABB worldBox = localBox.move(offset);
+        return worldBox.clip(ray.origin, ray.origin.add(ray.dir.scale(100.0))).map(vec -> vec.distanceTo(ray.origin)).orElse(Double.MAX_VALUE);
+    }
+
+    // --- Drawing Helpers (이전 코드와 동일, 생략 없음) ---
+    private static void renderBillboardArrow(PoseStack stack, Axis axis, int color, Vec3 toCam, float flip) {
+        boolean highlight = (hoveringAxis == axis || draggingAxis == axis);
         if (highlight) color = 0xFFFFFF55;
         Tesselator tesselator = Tesselator.getInstance();
         BufferBuilder buffer = tesselator.begin(VertexFormat.Mode.TRIANGLES, DefaultVertexFormat.POSITION_COLOR);
         Matrix4f mat = stack.last().pose();
-        float l = ARM_LENGTH;
-        float w = ARM_THICKNESS / 2.0f;
-        float start = CENTER_SIZE * 0.8f;
-        float minX=0, minY=0, minZ=0, maxX=0, maxY=0, maxZ=0;
-        int a = (color >> 24) & 0xFF; int r = (color >> 16) & 0xFF; int g = (color >> 8) & 0xFF; int b = (color) & 0xFF;
-        switch (axis) {
-            case X: minX = start; maxX = l; minY = -w; maxY = w; minZ = -w; maxZ = w; break;
-            case Y: minY = start; maxY = l; minX = -w; maxX = w; minZ = -w; maxZ = w; break;
-            case Z: minZ = start; maxZ = l; minX = -w; maxX = w; minY = -w; maxY = w; break;
-        }
-        addBox(buffer, mat, minX, minY, minZ, maxX, maxY, maxZ, r, g, b, a);
+        Vec3 rawAxis = getAxisVector(axis);
+        Vec3 axisDir = rawAxis.scale(flip);
+        Vec3 widthDir = axisDir.cross(toCam).normalize().scale(GIZMO_THICKNESS / 2.0f);
+        Vec3 pStart = axisDir.scale(CENTER_SIZE * 0.5f);
+        Vec3 pEnd = axisDir.scale(ARROW_LENGTH);
+        int a = (color >> 24) & 0xFF, r = (color >> 16) & 0xFF, g = (color >> 8) & 0xFF, b = (color) & 0xFF;
+        addQuadVec(buffer, mat, pStart.subtract(widthDir), pEnd.subtract(widthDir), pEnd.add(widthDir), pStart.add(widthDir), r, g, b, a);
+        float tipW = ARROW_TIP_SIZE;
+        Vec3 tipWidth = axisDir.cross(toCam).normalize().scale(tipW);
+        Vec3 pTipEnd = pEnd.add(axisDir.scale(tipW * 1.5));
+        addQuadVec(buffer, mat, pEnd.subtract(tipWidth), pTipEnd, pTipEnd, pEnd.add(tipWidth), r, g, b, a);
         try { BufferUploader.drawWithShader(buffer.buildOrThrow()); } catch (Exception e) {}
     }
 
-    private static void renderBox(PoseStack stack, float minX, float minY, float minZ, float maxX, float maxY, float maxZ, int color) {
+    private static void renderThickRing(PoseStack stack, Axis axis, int color) {
+        boolean highlight = (hoveringAxis == axis || draggingAxis == axis);
+        if (highlight) color = 0xFFFFFF55;
+        Tesselator tesselator = Tesselator.getInstance();
+        BufferBuilder buffer = tesselator.begin(VertexFormat.Mode.TRIANGLE_STRIP, DefaultVertexFormat.POSITION_COLOR);
+        Matrix4f mat = stack.last().pose();
+        int a = (color >> 24) & 0xFF, r = (color >> 16) & 0xFF, g = (color >> 8) & 0xFF, b = (color) & 0xFF;
+        int segments = 60;
+        float innerRad = RING_RADIUS - (GIZMO_THICKNESS / 2.0f);
+        float outerRad = RING_RADIUS + (GIZMO_THICKNESS / 2.0f);
+        for (int i = 0; i <= segments; i++) {
+            double ang = (Math.PI * 2 * i) / segments;
+            float cos = (float) Math.cos(ang);
+            float sin = (float) Math.sin(ang);
+            float xIn=0, yIn=0, zIn=0, xOut=0, yOut=0, zOut=0;
+            switch (axis) {
+                case ROT_X: xIn=0; yIn=sin*innerRad; zIn=cos*innerRad; xOut=0; yOut=sin*outerRad; zOut=cos*outerRad; break;
+                case ROT_Y: xIn=cos*innerRad; yIn=0; zIn=sin*innerRad; xOut=cos*outerRad; yOut=0; zOut=sin*outerRad; break;
+                case ROT_Z: xIn=cos*innerRad; yIn=sin*innerRad; zIn=0; xOut=cos*outerRad; yOut=sin*outerRad; zOut=0; break;
+            }
+            buffer.addVertex(mat, xIn, yIn, zIn).setColor(r, g, b, a);
+            buffer.addVertex(mat, xOut, yOut, zOut).setColor(r, g, b, a);
+        }
+        try { BufferUploader.drawWithShader(buffer.buildOrThrow()); } catch (Exception e) {}
+    }
+
+    static void renderBox(PoseStack stack, float minX, float minY, float minZ, float maxX, float maxY, float maxZ, int color) {
         Tesselator tess = Tesselator.getInstance();
         BufferBuilder buf = tess.begin(VertexFormat.Mode.TRIANGLES, DefaultVertexFormat.POSITION_COLOR);
         Matrix4f mat = stack.last().pose();
-        int a = (color >> 24) & 0xFF; int r = (color >> 16) & 0xFF; int g = (color >> 8) & 0xFF; int b = (color) & 0xFF;
-        addBox(buf, mat, minX, minY, minZ, maxX, maxY, maxZ, r, g, b, a);
+        int a = (color >> 24) & 0xFF, r = (color >> 16) & 0xFF, g = (color >> 8) & 0xFF, b = (color) & 0xFF;
+        addBoxQuad(buf, mat, minX, minY, minZ, maxX, maxY, maxZ, r, g, b, a);
         try { BufferUploader.drawWithShader(buf.buildOrThrow()); } catch (Exception e) {}
     }
 
-    private static void addBox(BufferBuilder b, Matrix4f m, float minX, float minY, float minZ, float maxX, float maxY, float maxZ, int r, int g, int bl, int a) {
+    private static void addBoxQuad(BufferBuilder b, Matrix4f m, float minX, float minY, float minZ, float maxX, float maxY, float maxZ, int r, int g, int bl, int a) {
         addQuad(b, m, minX,maxY,maxZ, maxX,maxY,maxZ, maxX,minY,maxZ, minX,minY,maxZ, r,g,bl,a);
         addQuad(b, m, maxX,maxY,minZ, minX,maxY,minZ, minX,minY,minZ, maxX,minY,minZ, r,g,bl,a);
         addQuad(b, m, minX,maxY,minZ, minX,maxY,maxZ, minX,minY,maxZ, minX,minY,minZ, r,g,bl,a);
@@ -135,154 +490,37 @@ public class GizmoSystem {
         addQuad(b, m, minX,minY,maxZ, maxX,minY,maxZ, maxX,minY,minZ, minX,minY,minZ, r,g,bl,a);
     }
 
+    private static void addQuadVec(BufferBuilder b, Matrix4f m, Vec3 p1, Vec3 p2, Vec3 p3, Vec3 p4, int r, int g, int bl, int a) {
+        b.addVertex(m, (float)p1.x, (float)p1.y, (float)p1.z).setColor(r,g,bl,a);
+        b.addVertex(m, (float)p2.x, (float)p2.y, (float)p2.z).setColor(r,g,bl,a);
+        b.addVertex(m, (float)p3.x, (float)p3.y, (float)p3.z).setColor(r,g,bl,a);
+        b.addVertex(m, (float)p3.x, (float)p3.y, (float)p3.z).setColor(r,g,bl,a);
+        b.addVertex(m, (float)p4.x, (float)p4.y, (float)p4.z).setColor(r,g,bl,a);
+        b.addVertex(m, (float)p1.x, (float)p1.y, (float)p1.z).setColor(r,g,bl,a);
+    }
+
     private static void addQuad(BufferBuilder b, Matrix4f m, float x1, float y1, float z1, float x2, float y2, float z2, float x3, float y3, float z3, float x4, float y4, float z4, int r, int g, int bl, int a) {
         b.addVertex(m, x1, y1, z1).setColor(r,g,bl,a); b.addVertex(m, x2, y2, z2).setColor(r,g,bl,a); b.addVertex(m, x3, y3, z3).setColor(r,g,bl,a);
         b.addVertex(m, x3, y3, z3).setColor(r,g,bl,a); b.addVertex(m, x4, y4, z4).setColor(r,g,bl,a); b.addVertex(m, x1, y1, z1).setColor(r,g,bl,a);
     }
 
-    // --- Hover Logic (기존 유지) ---
-    private static void updateHovering(double mouseX, double mouseY, Vec3 nodePos) {
-        RaycastHelper.Ray ray = RaycastHelper.getMouseRay(mouseX, mouseY);
-        if (ray == null) return;
-
-        hoveringAxis = Axis.NONE;
-
-        float s = CENTER_SIZE;
-        float w = ARM_THICKNESS * 2.5f;
-        float l = ARM_LENGTH;
-        float start = s * 0.8f;
-
-        AABB centerBox = new AABB(-s, -s, -s, s, s, s);
-        AABB xBox = new AABB(start, -w, -w, l, w, w);
-        AABB yBox = new AABB(-w, start, -w, w, l, w);
-        AABB zBox = new AABB(-w, -w, start, w, w, l);
-
-        double distC = getIntersectDist(ray, nodePos, centerBox);
-        double distX = getIntersectDist(ray, nodePos, xBox);
-        double distY = getIntersectDist(ray, nodePos, yBox);
-        double distZ = getIntersectDist(ray, nodePos, zBox);
-
-        double minDist = Double.MAX_VALUE;
-
-        if (distC < minDist) { minDist = distC; hoveringAxis = Axis.ALL; }
-        if (distX < minDist) { minDist = distX; hoveringAxis = Axis.X; }
-        if (distY < minDist) { minDist = distY; hoveringAxis = Axis.Y; }
-        if (distZ < minDist) { minDist = distZ; hoveringAxis = Axis.Z; }
-    }
-
-    private static double getIntersectDist(RaycastHelper.Ray ray, Vec3 offset, AABB localBox) {
-        AABB worldBox = localBox.move(offset);
-        return worldBox.clip(ray.origin, ray.origin.add(ray.dir.scale(100.0)))
-                .map(vec -> vec.distanceTo(ray.origin))
-                .orElse(Double.MAX_VALUE);
-    }
-
-    // --- Interaction (개선된 로직) ---
-
-    // 평면과 Ray 교차점 계산
-    private static Vec3 getRayPlaneIntersection(double mouseX, double mouseY, Vec3 planeNormal, Vec3 planePoint) {
-        RaycastHelper.Ray ray = RaycastHelper.getMouseRay(mouseX, mouseY);
-        if (ray == null) return null;
-
-        double denom = ray.dir.dot(planeNormal);
-        // 평면과 Ray가 평행하면(수직으로 바라보면) 클릭 불가 -> 매우 작은 값으로 체크
-        if (Math.abs(denom) < 1e-6) return null;
-
-        double t = planePoint.subtract(ray.origin).dot(planeNormal) / denom;
-        if (t < 0) return null; // 카메라 뒤쪽
-
-        return ray.origin.add(ray.dir.scale(t));
-    }
-
-    // [핵심] 현재 카메라가 바라보는 방향을 기준으로 '가상의 유리판(평면)' 위에서의 마우스 좌표를 구함
-    private static Vec3 getCameraPlaneHit(double mouseX, double mouseY, Vec3 nodePos) {
-        VantageCamera cam = VantageCamera.get();
-        // 평면의 법선(Normal) = 카메라가 바라보는 방향
-        // 이렇게 하면 항상 마우스 움직임과 1:1로 매칭되는 평면을 얻을 수 있습니다.
-        Vec3 planeNormal = cam.getForwardVector();
-
-        return getRayPlaneIntersection(mouseX, mouseY, planeNormal, nodePos);
-    }
-
-    public static boolean handlePress(int button, double mouseX, double mouseY) {
-        if (button == 0 && hoveringAxis != Axis.NONE) {
-            draggingAxis = hoveringAxis;
-            SceneData.Node node = SceneData.get().getSelectedNode();
-
-            // 1. 드래그 시작 시점의 노드 위치 저장
-            startNodePos = node.position;
-
-            // 2. 드래그 시작 시점의 '가상 평면' 위 마우스 클릭 위치 저장
-            //    이때 평면의 기준점(planePoint)은 '현재 노드 위치'입니다.
-            Vec3 hit = getCameraPlaneHit(mouseX, mouseY, node.position);
-
-            if (hit != null) {
-                startHitPos = hit;
-                return true;
-            }
+    private static double getAngleFromAxis(Axis axis, Vec3 vec) {
+        switch (axis) {
+            case ROT_X: return Math.atan2(vec.z, vec.y);
+            case ROT_Y: return Math.atan2(vec.z, vec.x);
+            case ROT_Z: return Math.atan2(vec.y, vec.x);
+            default: return 0;
         }
-        return false;
     }
 
-    public static void handleRelease() {
-        draggingAxis = Axis.NONE;
-    }
-
-    public static boolean handleDrag(double mouseX, double mouseY) {
-        if (draggingAxis == Axis.NONE) return false;
-
-        SceneData.Node node = SceneData.get().getSelectedNode();
-        if (node == null) return false;
-
-        // 1. 현재 마우스 위치를 '드래그 시작했을 때 생성한 가상 평면' 위로 투영
-        //    중요: 평면의 기준점은 움직이는 노드가 아니라 '처음 클릭했던 위치(startNodePos)'여야 평면이 안 흔들립니다.
-        Vec3 currentHitPos = getRayPlaneIntersection(mouseX, mouseY, VantageCamera.get().getForwardVector(), startNodePos);
-
-        if (currentHitPos == null) return true; // 허공을 보고 있거나 계산 불가 시 무시
-
-        // 2. 이동량(Delta) 계산 = 현재 히트 좌표 - 시작 히트 좌표
-        Vec3 delta = currentHitPos.subtract(startHitPos);
-
-        // 3. 축에 따라 이동량 제한하여 적용
-        //    (기존 위치 + 이동량)
-        switch (draggingAxis) {
-            case X:
-                node.position = new Vec3(startNodePos.x + delta.x, startNodePos.y, startNodePos.z);
-                break;
-            case Y:
-                node.position = new Vec3(startNodePos.x, startNodePos.y + delta.y, startNodePos.z);
-                break;
-            case Z:
-                node.position = new Vec3(startNodePos.x, startNodePos.y, startNodePos.z + delta.z);
-                break;
-            case ALL:
-                node.position = startNodePos.add(delta);
-                break;
-        }
-
-        return true;
-    }
-
-    public static boolean isHovering() { return hoveringAxis != Axis.NONE; }
-    public static boolean isDragging() { return draggingAxis != Axis.NONE; }
-
-    public static void handleScroll(double delta) {
-        SceneData.Node node = SceneData.get().getSelectedNode();
-        if (node == null) return;
-
-        Axis targetAxis = (draggingAxis != Axis.NONE) ? draggingAxis : hoveringAxis;
-        if (targetAxis == Axis.NONE) return;
-
-        double speed = 0.5;
-        // 스크롤은 단순히 해당 축 방향으로 더하기
-        switch (targetAxis) {
-            case X: node.position = node.position.add(delta * speed, 0, 0); break;
-            case Y: node.position = node.position.add(0, delta * speed, 0); break;
-            case Z: node.position = node.position.add(0, 0, delta * speed); break;
-            case ALL:
-                VantageCamera cam = VantageCamera.get();
-                node.position = node.position.add(cam.getForwardVector().scale(delta * speed));
-                break;
+    private static Vec3 getVectorFromAngle(Axis axis, double angle, float radius) {
+        double cos = Math.cos(angle) * radius;
+        double sin = Math.sin(angle) * radius;
+        switch (axis) {
+            case ROT_X: return new Vec3(0, cos, sin);
+            case ROT_Y: return new Vec3(cos, 0, sin);
+            case ROT_Z: return new Vec3(cos, sin, 0);
+            default: return Vec3.ZERO;
         }
     }
 }
