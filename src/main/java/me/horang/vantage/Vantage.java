@@ -2,6 +2,7 @@ package me.horang.vantage;
 
 import com.mojang.logging.LogUtils;
 import me.horang.vantage.client.KeyBindings;
+import me.horang.vantage.network.NetworkManager;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
@@ -44,6 +45,7 @@ public class Vantage {
         // 이유: 이 클래스 안에 @SubscribeEvent 메서드가 없으면 에러가 남.
 
         modEventBus.addListener(KeyBindings::registerKeyMappings);
+        modEventBus.addListener(NetworkManager::register);
         // 대신, 라이프사이클 이벤트를 '메서드 참조' 방식으로 등록하는 것이 네오포지의 정석임.
         modEventBus.addListener(this::commonSetup);
         modEventBus.addListener(this::clientSetup);
